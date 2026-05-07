@@ -1,0 +1,53 @@
+{
+  "__version": 1,
+  "dashboard_title": "{{ tenant_id | upper }} — Cycle Time",
+  "description": "End-to-end cycle time analysis for {{ tenant_id }}.",
+  "certified_by": "Platform Team",
+
+  "metadata": {
+    "tenant_id": "{{ tenant_id }}",
+    "catalog": "{{ catalog }}",
+    "gold_schema": "gold_{{ tenant_id }}",
+    "template_version": "1.0.0"
+  },
+
+  "charts": [
+    {
+      "id": "avg_cycle_days",
+      "type": "big_number_total",
+      "title": "Average Cycle Days",
+      "datasource": { "table": "{{ catalog }}.gold_{{ tenant_id }}.cycle_time" },
+      "query": {
+        "metrics": [{ "expressionType": "SIMPLE", "column": "cycle_days", "aggregate": "AVG" }]
+      },
+      "position": { "x": 0, "y": 0, "w": 3, "h": 2 }
+    },
+    {
+      "id": "cycle_time_distribution",
+      "type": "histogram",
+      "title": "Cycle Time Distribution (days)",
+      "datasource": { "table": "{{ catalog }}.gold_{{ tenant_id }}.cycle_time" },
+      "query": {
+        "all_columns": ["cycle_days"],
+        "bins": 20
+      },
+      "position": { "x": 0, "y": 2, "w": 8, "h": 4 }
+    },
+    {
+      "id": "p50_p95_cycle_time",
+      "type": "echarts_timeseries_line",
+      "title": "P50 and P95 Cycle Time Over Time",
+      "datasource": { "table": "{{ catalog }}.gold_{{ tenant_id }}.cycle_time" },
+      "query": {
+        "metrics": [
+          { "expressionType": "SIMPLE", "column": "cycle_days", "aggregate": "PERCENTILE_50" },
+          { "expressionType": "SIMPLE", "column": "cycle_days", "aggregate": "PERCENTILE_95" }
+        ],
+        "time_column": "started_at",
+        "granularity_sqla": "started_at",
+        "time_grain_sqla": "P1W"
+      },
+      "position": { "x": 0, "y": 6, "w": 12, "h": 4 }
+    }
+  ]
+}

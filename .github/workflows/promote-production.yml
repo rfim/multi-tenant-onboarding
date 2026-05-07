@@ -1,0 +1,126 @@
+name: Promote to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to promote to production"
+        required: true
+        type: string
+
+jobs:
+  verify-approvals:
+    name: Verify required approvals
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Check approvals against category requirements
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m scripts.check_pr_approvals \
+            --pr-number ${{ github.event.inputs.pr_number }} \
+            --categories-file promotion/categories.yml
+          # Reads the PR's category label, looks up required_approvers from
+          # categories.yml, and verifies all required roles have approved.
+
+  verify-holds:
+    name: Verify staging and canary holds
+    runs-on: ubuntu-latest
+    needs: verify-approvals
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Check hold durations
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m scripts.check_promotion_holds \
+            --pr-number ${{ github.event.inputs.pr_number }} \
+            --categories-file promotion/categories.yml
+          # Checks staging_hold_hours, canary_hold_hours, and mandatory_wait_days
+          # against actual elapsed time. Fails if any hold has not elapsed.
+
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs: verify-holds
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Bundle deploy to production
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          databricks bundle deploy --target prod
+
+      - name: Record production deployment
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          python -m scripts.record_prod_deployment \
+            --pr-number ${{ github.event.inputs.pr_number }}
+          # Writes to monitoring.tenant_change_log with change_type=deployment
+
+  post-deployment-monitor:
+    name: Start post-deployment monitor (agentic)
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Trigger post-deployment monitoring workflow
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          databricks jobs run-now \
+            --job-name "[prod] Post-Deployment Monitor" \
+            --job-params '{
+              "pr_number": "${{ github.event.inputs.pr_number }}",
+              "monitor_hours": 24,
+              "slack_channel": "#platform-deployments",
+              "rollback_runbook": "promotion/runbooks/rollback_shared_layer.md"
+            }'
+          # The monitor runs for 24 hours, posting hourly status updates.
+          # If drift exceeds the threshold, it posts a rollback recommendation
+          # to the PR. It cannot execute the rollback autonomously.
+
+      - name: Post production deployment comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ github.event.inputs.pr_number }},
+              body: [
+                '## Promoted to production',
+                '',
+                'The post-deployment agent is monitoring production behaviour for 24 hours.',
+                'Hourly status updates will be posted to `#platform-deployments`.',
+                '',
+                'If rollback is required, follow the runbook in',
+                '`promotion/runbooks/` for this change category.',
+                'The agent will post a rollback recommendation here if drift',
+                'exceeds the threshold. A human must execute the rollback.',
+              ].join('\n')
+            });

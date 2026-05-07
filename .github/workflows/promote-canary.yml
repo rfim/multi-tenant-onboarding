@@ -1,0 +1,125 @@
+name: Promote to Canary
+
+# Triggered manually after staging hold has elapsed for Category 3 changes.
+# Category 1, 2, and 4 changes do not use this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to promote to canary"
+        required: true
+        type: string
+
+jobs:
+  verify-category:
+    name: Verify this PR is Category 3
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Check PR category label
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Fail if the PR does not have the 'shared_layer' label
+          python -m scripts.check_pr_label \
+            --pr-number ${{ github.event.inputs.pr_number }} \
+            --required-label shared_layer
+
+  verify-staging-hold:
+    name: Verify staging hold has elapsed
+    runs-on: ubuntu-latest
+    needs: verify-category
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Check staging hold duration
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+        run: |
+          python -m scripts.check_staging_hold \
+            --pr-number ${{ github.event.inputs.pr_number }} \
+            --required-hours 24
+          # Fails if the deployment has not been in staging for 24 hours.
+
+  deploy-canary:
+    name: Deploy to canary tenant
+    runs-on: ubuntu-latest
+    needs: verify-staging-hold
+    environment: canary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Load canary tenant config
+        id: canary
+        run: |
+          python -m scripts.load_canary_config \
+            --config-file promotion/canary_tenant.yml \
+            --output-github-outputs
+
+      - name: Deploy bundle to prod (canary tenant only)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          # Deploy the bundle to production but restrict pipeline runs to the
+          # canary tenant only. The canary tenant config sets a workflow parameter
+          # that limits the pipeline to CANARY_TENANT_ID only.
+          databricks bundle deploy --target prod \
+            --var canary_only=true \
+            --var canary_tenant_id=${{ steps.canary.outputs.tenant_id }}
+
+      - name: Trigger canary pipeline runs
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          databricks jobs run-now \
+            --job-name "[prod] Onboarding Orchestrator" \
+            --job-params '{"canary_only": true, "canary_tenant_id": "${{ steps.canary.outputs.tenant_id }}"}'
+
+      - name: Record canary start time
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          # Write canary start time to monitoring.canary_deployments
+          python -m scripts.record_canary_start \
+            --pr-number ${{ github.event.inputs.pr_number }} \
+            --tenant-id ${{ steps.canary.outputs.tenant_id }}
+
+      - name: Post canary start comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ github.event.inputs.pr_number }},
+              body: [
+                '## Canary deployment started',
+                '',
+                'Canary tenant: `${{ steps.canary.outputs.tenant_id }}`',
+                'Hold duration: 24 hours',
+                'Monitor: [DQ dashboard](#) | [#platform-deployments](#)',
+                '',
+                'The post-deployment agent will monitor canary behaviour and post',
+                'hourly updates to `#platform-deployments`. If drift exceeds the',
+                'threshold in `promotion/categories.yml`, it will post a rollback',
+                'recommendation to this PR.',
+                '',
+                'To promote to all tenants after 24 hours, trigger the',
+                '`promote-production.yml` workflow with this PR number.',
+              ].join('\n')
+            });

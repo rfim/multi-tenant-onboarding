@@ -1,0 +1,39 @@
+{
+  "__version": 1,
+  "dashboard_title": "{{ tenant_id | upper }} — User Activity",
+  "description": "Platform user activity metrics for {{ tenant_id }}.",
+  "certified_by": "Platform Team",
+  "metadata": {
+    "tenant_id": "{{ tenant_id }}",
+    "catalog": "{{ catalog }}",
+    "gold_schema": "gold_{{ tenant_id }}",
+    "template_version": "1.0.0"
+  },
+  "charts": [
+    {
+      "id": "active_users",
+      "type": "big_number_total",
+      "title": "Active Users (30 days)",
+      "datasource": { "table": "{{ catalog }}.gold_{{ tenant_id }}.event_detail" },
+      "query": {
+        "metrics": [{ "expressionType": "COUNT_DISTINCT", "column": "reference_id" }],
+        "time_range": "Last 30 days",
+        "time_column": "event_timestamp"
+      },
+      "position": { "x": 0, "y": 0, "w": 3, "h": 2 }
+    },
+    {
+      "id": "user_activity_heatmap",
+      "type": "cal_heatmap",
+      "title": "Activity Heatmap",
+      "datasource": { "table": "{{ catalog }}.gold_{{ tenant_id }}.event_detail" },
+      "query": {
+        "metrics": [{ "expressionType": "COUNT", "column": "event_id" }],
+        "time_column": "event_timestamp",
+        "granularity_sqla": "event_timestamp",
+        "time_grain_sqla": "P1D"
+      },
+      "position": { "x": 0, "y": 2, "w": 12, "h": 3 }
+    }
+  ]
+}

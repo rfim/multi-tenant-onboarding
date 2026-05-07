@@ -1,0 +1,128 @@
+name: Emergency Hotfix
+
+# Bypasses the standard promotion path. Requires on-call senior engineer
+# approval and mandatory retroactive review within 48 hours.
+#
+# SLA: 30 minutes from trigger to production deployment.
+# Retroactive review: automatically opened 48 hours after deployment.
+#
+# Use this workflow only for genuine production incidents where the standard
+# path would cause unacceptable downtime or data loss.
+
+on:
+  workflow_dispatch:
+    inputs:
+      incident_description:
+        description: "Describe the incident (will appear in audit log)"
+        required: true
+        type: string
+      oncall_engineer:
+        description: "GitHub username of the on-call senior engineer approving this"
+        required: true
+        type: string
+      pr_number:
+        description: "PR number containing the hotfix (must already exist)"
+        required: true
+        type: string
+
+jobs:
+  verify-oncall-approval:
+    name: Verify on-call engineer approval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Verify approver has senior_engineer_oncall role
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m scripts.check_oncall_role \
+            --username ${{ github.event.inputs.oncall_engineer }} \
+            --required-role senior_engineer_oncall
+          # Checks the platform's role registry; fails if the user does not
+          # have the on-call role at the time of the hotfix.
+
+      - name: Verify PR has hotfix label
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m scripts.check_pr_label \
+            --pr-number ${{ github.event.inputs.pr_number }} \
+            --required-label emergency_hotfix
+
+  audit-log:
+    name: Write audit log entry
+    runs-on: ubuntu-latest
+    needs: verify-oncall-approval
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Record hotfix in monitoring
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          python -m scripts.record_emergency_hotfix \
+            --pr-number ${{ github.event.inputs.pr_number }} \
+            --oncall-engineer ${{ github.event.inputs.oncall_engineer }} \
+            --incident "${{ github.event.inputs.incident_description }}"
+          # Writes to monitoring.tenant_change_log with change_type=emergency_hotfix
+          # and to monitoring.emergency_hotfixes for compliance tracking.
+
+  deploy-production:
+    name: Deploy directly to production
+    runs-on: ubuntu-latest
+    needs: audit-log
+    environment: production-emergency
+    # production-emergency environment requires manual approval from
+    # the on-call engineer in the GitHub environment settings.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Deploy hotfix to production
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          databricks bundle deploy --target prod
+
+      - name: Post incident update to Slack
+        run: |
+          # TODO: POST to Slack #platform-incidents with:
+          # incident_description, oncall_engineer, deployment_time, pr_url
+          echo "Would post incident update to #platform-incidents"
+
+  schedule-retroactive-review:
+    name: Schedule retroactive review (48h)
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Open retroactive review ticket
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m scripts.schedule_retroactive_review \
+            --pr-number ${{ github.event.inputs.pr_number }} \
+            --delay-hours 48 \
+            --oncall-engineer ${{ github.event.inputs.oncall_engineer }}
+          # Creates a GitHub Issue with a 48-hour due date and assigns it to
+          # the on-call engineer. The issue template is in
+          # .github/ISSUE_TEMPLATE/retroactive_review.md.
+          # It checks:
+          #   - Was the root cause identified and fixed?
+          #   - Is a follow-up PR required in the correct change category?
+          #   - Was the emergency category misused?

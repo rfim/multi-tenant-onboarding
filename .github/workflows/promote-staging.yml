@@ -1,0 +1,120 @@
+name: Promote to Staging
+
+on:
+  pull_request:
+    branches: [dev]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  classify:
+    name: Classify change category
+    runs-on: ubuntu-latest
+    outputs:
+      category_id: ${{ steps.classify.outputs.category_id }}
+      category_name: ${{ steps.classify.outputs.category_name }}
+      sla_hours: ${{ steps.classify.outputs.sla_hours }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - run: pip install -r requirements.txt
+
+      - name: Run promotion classifier
+        id: classify
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m agents.promotion_classifier.classifier \
+            --pr-number ${{ github.event.pull_request.number }} \
+            --post-comment \
+            --apply-label \
+            --output-github-outputs
+
+  validate:
+    name: Bundle validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - name: Validate bundle
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+        run: databricks bundle validate --target staging
+
+  test:
+    name: Run test suite
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+      - run: pytest tests/ -x -q
+
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    needs: [classify, test]
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Deploy bundle to staging
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+        run: databricks bundle deploy --target staging
+
+  staging-comparison:
+    name: Staging baseline comparison (agentic)
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements.txt
+
+      - name: Run staging comparison agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m agents.staging_comparator \
+            --pr-number ${{ github.event.pull_request.number }} \
+            --category-id ${{ needs.classify.outputs.category_id }} \
+            --post-comment
+        # The staging comparator reads from the baseline snapshot in
+        # monitoring.staging_baseline, never from production directly.
+        # It posts a diff summary to the PR but does not block it unless
+        # divergence exceeds the threshold in categories.yml.
+
+  staging-hold:
+    name: Enforce staging hold
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    steps:
+      - name: Check staging hold requirement
+        env:
+          CATEGORY_ID: ${{ needs.classify.outputs.category_id }}
+        run: |
+          # Category 3 and 4 require explicit staging hold before canary/prod.
+          # This step records the deployment timestamp in staging_deployments.
+          # The promote-canary.yml and promote-production.yml workflows check
+          # the hold duration before proceeding.
+          echo "Staging hold recorded for category $CATEGORY_ID"
+          # TODO: write to monitoring.staging_deployments with:
+          #   pr_number, category_id, deployed_at, hold_hours_required

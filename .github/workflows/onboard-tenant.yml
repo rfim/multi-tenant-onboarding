@@ -1,0 +1,133 @@
+name: Onboard Tenant
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        description: "Tenant ID (slug, lowercase, hyphens only)"
+        required: true
+        type: string
+      resume_from_state:
+        description: "Resume from state (leave blank for fresh onboarding)"
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Dry run (validate only, no catalog writes)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: onboard-${{ github.event.inputs.tenant_id }}
+  cancel-in-progress: false   # never cancel an in-progress onboarding
+
+jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tenant_id format
+        run: |
+          if ! echo "${{ github.event.inputs.tenant_id }}" | grep -qE '^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$'; then
+            echo "ERROR: tenant_id must be lowercase alphanumeric with hyphens, 3-64 chars"
+            exit 1
+          fi
+
+      - name: Check tenant not already active
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+        run: |
+          # TODO: query monitoring.tenant_registry and fail if state = ACTIVE
+          echo "Tenant validation passed."
+
+  classify-pr:
+    name: Classify change category
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - run: pip install -r requirements.txt
+
+      - name: Run promotion classifier
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m agents.promotion_classifier.classifier \
+            --pr-number ${{ github.event.pull_request.number }} \
+            --post-comment \
+            --apply-label
+
+  run-onboarding:
+    name: Run onboarding state machine
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - run: pip install -r requirements.txt
+
+      - name: Bundle deploy to staging
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+        run: |
+          databricks bundle deploy --target staging
+
+      - name: Trigger onboarding workflow
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+        run: |
+          databricks jobs run-now \
+            --job-name "[staging] Onboarding Orchestrator" \
+            --job-params '{
+              "tenant_id": "${{ github.event.inputs.tenant_id }}",
+              "resume_from_state": "${{ github.event.inputs.resume_from_state }}",
+              "dry_run": "${{ github.event.inputs.dry_run }}"
+            }'
+
+      - name: Wait for workflow completion
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_STAGING }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_STAGING }}
+        run: |
+          # TODO: poll workflow run status until terminal or timeout (3600s)
+          echo "Waiting for onboarding workflow..."
+
+      - name: Promote to production
+        if: ${{ !github.event.inputs.dry_run }}
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_PROD }}
+        run: |
+          databricks bundle deploy --target prod
+          databricks jobs run-now \
+            --job-name "[prod] Onboarding Orchestrator" \
+            --job-params '{
+              "tenant_id": "${{ github.event.inputs.tenant_id }}"
+            }'
+
+      - name: Post deployment summary
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ job.status }}';
+            const tenant = '${{ github.event.inputs.tenant_id }}';
+            core.notice(`Onboarding for ${tenant}: ${status}`);

@@ -1,0 +1,149 @@
+bundle:
+  name: multi-tenant-onboarding
+
+# Target environments. The active target is selected with:
+#   databricks bundle deploy --target <name>
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: ${var.workspace_host}
+      root_path: /Shared/bundles/dev/multi-tenant-onboarding
+    variables:
+      catalog: platform_catalog_dev
+      env: dev
+      onboarding_queue: onboarding-dev
+      slack_channel_prefix: "#dev-"
+
+  staging:
+    mode: development
+    workspace:
+      host: ${var.workspace_host}
+      root_path: /Shared/bundles/staging/multi-tenant-onboarding
+    variables:
+      catalog: platform_catalog_staging
+      env: staging
+      onboarding_queue: onboarding-staging
+      slack_channel_prefix: "#staging-"
+
+  prod:
+    mode: production
+    workspace:
+      host: ${var.workspace_host}
+      root_path: /Shared/bundles/prod/multi-tenant-onboarding
+    variables:
+      catalog: platform_catalog
+      env: prod
+      onboarding_queue: onboarding-prod
+      slack_channel_prefix: "#"
+
+variables:
+  workspace_host:
+    description: "Databricks workspace URL"
+  catalog:
+    description: "Unity Catalog name for this environment"
+  env:
+    description: "Environment identifier: dev | staging | prod"
+  onboarding_queue:
+    description: "Message queue name for onboarding events"
+  slack_channel_prefix:
+    description: "Prefix for Slack channel names"
+
+# Workflow definitions are imported from individual resource files.
+# Each workflow maps to a component in this repository.
+
+resources:
+  jobs:
+    onboarding_orchestrator:
+      name: "[${var.env}] Onboarding Orchestrator"
+      description: "Deterministic state machine that processes tenant onboarding events."
+      tasks:
+        - task_key: run_state_machine
+          python_wheel_task:
+            package_name: orchestrator
+            entry_point: run
+            parameters:
+              - "--env"
+              - "${var.env}"
+              - "--catalog"
+              - "${var.catalog}"
+          job_cluster_key: onboarding_cluster
+          timeout_seconds: 3600
+          retry_on_timeout: false
+          max_retries: 0
+      job_clusters:
+        - job_cluster_key: onboarding_cluster
+          new_cluster:
+            spark_version: "14.3.x-scala2.12"
+            node_type_id: "m5d.large"
+            num_workers: 1
+            spark_conf:
+              "spark.databricks.delta.retentionDurationCheck.enabled": "false"
+            data_security_mode: SINGLE_USER
+
+    deviation_detector:
+      name: "[${var.env}] Deviation Detector"
+      description: "Agentic schema deviation detection. Outputs draft PRs only."
+      tasks:
+        - task_key: detect_deviations
+          python_wheel_task:
+            package_name: agents.deviation_detector
+            entry_point: run
+            parameters:
+              - "--env"
+              - "${var.env}"
+              - "--catalog"
+              - "${var.catalog}"
+          job_cluster_key: agent_cluster
+          timeout_seconds: 1800
+          max_retries: 1
+
+    anomaly_detector:
+      name: "[${var.env}] DQ Anomaly Detector"
+      description: "Agentic data quality anomaly detection. Outputs alerts and draft PRs."
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: "UTC"
+      tasks:
+        - task_key: detect_anomalies
+          python_wheel_task:
+            package_name: agents.anomaly_detector
+            entry_point: run
+            parameters:
+              - "--env"
+              - "${var.env}"
+              - "--catalog"
+              - "${var.catalog}"
+          job_cluster_key: agent_cluster
+          timeout_seconds: 3600
+
+    changelog_summariser:
+      name: "[${var.env}] Changelog Summariser"
+      description: "Generates human-readable change summaries for stakeholders."
+      schedule:
+        quartz_cron_expression: "0 0 8 ? * MON"
+        timezone_id: "UTC"
+      tasks:
+        - task_key: summarise_changelogs
+          python_wheel_task:
+            package_name: agents.changelog_summariser
+            entry_point: run
+            parameters:
+              - "--env"
+              - "${var.env}"
+              - "--catalog"
+              - "${var.catalog}"
+              - "--lookback-days"
+              - "7"
+          job_cluster_key: agent_cluster
+          timeout_seconds: 1800
+
+      job_clusters:
+        - job_cluster_key: agent_cluster
+          new_cluster:
+            spark_version: "14.3.x-scala2.12"
+            node_type_id: "m5d.xlarge"
+            num_workers: 2
+            data_security_mode: SINGLE_USER

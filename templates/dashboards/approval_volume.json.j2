@@ -1,0 +1,40 @@
+{
+  "__version": 1,
+  "dashboard_title": "{{ tenant_id | upper }} — Approval Volume",
+  "description": "Approval event volumes and trend for {{ tenant_id }}.",
+  "certified_by": "Platform Team",
+  "metadata": {
+    "tenant_id": "{{ tenant_id }}",
+    "catalog": "{{ catalog }}",
+    "gold_schema": "gold_{{ tenant_id }}",
+    "template_version": "1.0.0"
+  },
+  "charts": [
+    {
+      "id": "approval_volume_trend",
+      "type": "echarts_timeseries_bar",
+      "title": "Approval Volume (daily)",
+      "datasource": { "table": "{{ catalog }}.gold_{{ tenant_id }}.kpi_summary" },
+      "query": {
+        "metrics": [{ "expressionType": "SIMPLE", "column": "event_count", "aggregate": "SUM" }],
+        "filters": [{ "col": "event_type", "op": "==", "val": "approved" }],
+        "time_column": "event_date",
+        "granularity_sqla": "event_date"
+      },
+      "position": { "x": 0, "y": 0, "w": 12, "h": 4 }
+    },
+    {
+      "id": "approval_rate",
+      "type": "big_number_total",
+      "title": "Approval Rate",
+      "datasource": { "table": "{{ catalog }}.gold_{{ tenant_id }}.kpi_summary" },
+      "query": {
+        "metrics": [{
+          "expressionType": "SQL",
+          "sqlExpression": "ROUND(SUM(CASE WHEN event_type = 'approved' THEN event_count ELSE 0 END) * 100.0 / NULLIF(SUM(event_count), 0), 1)"
+        }]
+      },
+      "position": { "x": 0, "y": 4, "w": 3, "h": 2 }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "__version": 1,
+  "dashboard_title": "{{ tenant_id | upper }} — Vendor Analytics",
+  "description": "Per-vendor performance metrics for {{ tenant_id }}.",
+  "certified_by": "Platform Team",
+  "metadata": {
+    "tenant_id": "{{ tenant_id }}",
+    "catalog": "{{ catalog }}",
+    "gold_schema": "gold_{{ tenant_id }}",
+    "template_version": "1.0.0"
+  },
+  "charts": [
+    {
+      "id": "vendor_volume",
+      "type": "echarts_bar",
+      "title": "Event Volume by Source System",
+      "datasource": { "table": "{{ catalog }}.gold_{{ tenant_id }}.kpi_summary" },
+      "query": {
+        "metrics": [{ "expressionType": "SIMPLE", "column": "event_count", "aggregate": "SUM" }],
+        "groupby": ["source_system"]
+      },
+      "position": { "x": 0, "y": 0, "w": 6, "h": 4 }
+    }
+  ],
+  "notes": "Vendor analytics uses source_system from the Silver events table. If the tenant's source system is not captured, add it to the Silver model via a deviation_detector PR."
+}

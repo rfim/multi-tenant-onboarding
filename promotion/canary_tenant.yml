@@ -1,0 +1,45 @@
+# Canary tenant configuration
+#
+# The canary tenant is a production tenant that receives Category 3 (shared
+# layer) changes 24 hours before all other tenants. It must be a real tenant
+# with representative data volume and schema complexity.
+#
+# Requirements for the canary tenant:
+#   - Active and processing live data (not synthetic)
+#   - Data volume within 20% of the platform median
+#   - No custom schema deviations (uses the standard template)
+#   - Tenant owner has agreed to the canary arrangement in the service contract
+#   - Monitored by the DQ anomaly detector with Sev-1 alerting
+
+canary_tenant:
+  tenant_id: "platform-canary-01"         # replace with real canary tenant ID
+  display_name: "Platform Canary Tenant"
+  agreed_to_canary: true
+  canary_since: "2024-01-01"
+
+  # The canary tenant's Slack channel for canary-specific alerts
+  slack_channel: "#canary-alerts"
+
+  # Minimum hold duration before promoting to all tenants
+  hold_hours: 24
+
+  # DQ thresholds specific to canary evaluation
+  # These are stricter than production thresholds because the canary is
+  # specifically watching for regressions introduced by the staged change.
+  dq_thresholds:
+    null_rate_max_pct: 2          # fail canary if any key column null rate > 2%
+    row_count_delta_max_pct: 10   # fail canary if volume changes > 10% vs baseline
+    unexpected_pct_max: 5         # fail canary if GE unexpected_pct > 5%
+
+  # Rollback trigger: if these thresholds are breached during canary hold,
+  # the post-deployment agent posts a rollback recommendation.
+  # The rollback recommendation references promotion/runbooks/rollback_shared_layer.md.
+  # A human must execute the rollback; the agent cannot do so autonomously.
+  auto_rollback_recommendation: true
+
+  # Contacts notified when the canary hold completes successfully
+  success_notification:
+    slack_channel: "#platform-deployments"
+    message_template: >
+      Canary hold complete for {pr_title}. {hold_hours}h canary period passed
+      with no DQ regressions. Safe to promote to all tenants via promote-production.yml.

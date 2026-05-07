@@ -1,0 +1,71 @@
+{
+  "__version": 1,
+  "dashboard_title": "{{ tenant_id | upper }} — KPI Overview",
+  "description": "Top-level KPIs for {{ tenant_id }}. Refreshed daily.",
+  "certified_by": "Platform Team",
+  "certification_details": "Baseline template v1",
+
+  "metadata": {
+    "tenant_id": "{{ tenant_id }}",
+    "catalog": "{{ catalog }}",
+    "gold_schema": "gold_{{ tenant_id }}",
+    "generated_by": "scaffold_dashboards",
+    "template_version": "1.0.0"
+  },
+
+  "filters": [
+    {
+      "id": "filter_date_range",
+      "type": "DateRange",
+      "targets": ["all"],
+      "config": { "default_value": "Last 30 days" }
+    }
+  ],
+
+  "charts": [
+    {
+      "id": "total_events",
+      "type": "big_number_total",
+      "title": "Total Events",
+      "datasource": {
+        "table": "{{ catalog }}.gold_{{ tenant_id }}.kpi_summary",
+        "type": "table"
+      },
+      "query": {
+        "metrics": [{ "expressionType": "SIMPLE", "column": "event_count", "aggregate": "SUM" }],
+        "time_range": "No filter"
+      },
+      "position": { "x": 0, "y": 0, "w": 3, "h": 2 }
+    },
+    {
+      "id": "events_by_status",
+      "type": "pie",
+      "title": "Events by Status",
+      "datasource": {
+        "table": "{{ catalog }}.gold_{{ tenant_id }}.kpi_summary",
+        "type": "table"
+      },
+      "query": {
+        "metrics": [{ "expressionType": "SIMPLE", "column": "event_count", "aggregate": "SUM" }],
+        "groupby": ["status"]
+      },
+      "position": { "x": 3, "y": 0, "w": 4, "h": 4 }
+    },
+    {
+      "id": "events_over_time",
+      "type": "echarts_timeseries_line",
+      "title": "Events Over Time",
+      "datasource": {
+        "table": "{{ catalog }}.gold_{{ tenant_id }}.kpi_summary",
+        "type": "table"
+      },
+      "query": {
+        "metrics": [{ "expressionType": "SIMPLE", "column": "event_count", "aggregate": "SUM" }],
+        "groupby": ["event_type"],
+        "time_column": "event_date",
+        "granularity_sqla": "event_date"
+      },
+      "position": { "x": 0, "y": 2, "w": 12, "h": 4 }
+    }
+  ]
+}

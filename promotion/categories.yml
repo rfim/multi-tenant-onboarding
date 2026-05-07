@@ -1,0 +1,229 @@
+# Promotion Categories
+#
+# Authoritative definitions of the five change categories. Every pull request
+# must be classified into exactly one category before it can be promoted.
+# The promotion_classifier agent applies these definitions; see
+# skills/promotion_classifier.md for the decision tree.
+#
+# Field reference:
+#   promotion_path   — ordered list of environments the change must traverse
+#   sla_hours        — maximum hours from PR open to production deployment
+#   auto_promote     — whether CI passing is sufficient to promote (no human)
+#   required_approvers — roles that must approve before promotion to prod
+#   staging_hold_hours — minimum hours the change must sit in staging
+#   canary_hold_hours  — minimum hours the change must sit in canary (if used)
+#   mandatory_wait_days — calendar days that must elapse regardless of approvals
+#   rollback_runbook — path to the runbook for reverting this category
+#   auto_rollback_window_hours — hours during which the post-deployment agent
+#                                 watches for drift and recommends rollback
+#   files_in_scope   — glob patterns that place a file in this category
+#   notes            — human-readable guidance
+
+categories:
+
+  tenant_config:
+    id: 1
+    display_name: "Tenant config changes"
+    description: >
+      New customer registration, Unity Catalog grants for a single tenant,
+      dashboard cloning, DQ contract instantiation, or any change scoped
+      exclusively to one tenant that does not modify shared pipeline logic.
+    promotion_path:
+      - dev
+      - staging
+      - prod
+    sla_hours: 1
+    auto_promote: true
+    required_approvers: []
+    staging_hold_hours: 0
+    canary_hold_hours: 0
+    mandatory_wait_days: 0
+    rollback_runbook: "promotion/runbooks/rollback_tenant_config.md"
+    auto_rollback_window_hours: 24
+    auto_rollback_threshold:
+      dq_failure_rate_pct: 5
+      row_count_delta_pct: 20
+    files_in_scope:
+      - "orchestrator/handlers/register_tenant.py"
+      - "orchestrator/handlers/provision_grants.py"
+      - "orchestrator/handlers/scaffold_dashboards.py"
+      - "orchestrator/handlers/scaffold_quality.py"
+      - "orchestrator/handlers/activate_tenant.py"
+      - "templates/dashboards/**"
+      - "templates/quality_contracts/**"
+    notes: >
+      These changes are low-risk because they create new objects rather than
+      modifying existing ones. CI must pass all onboarding integration tests.
+      The post-deployment agent watches the new tenant for 24 hours and will
+      recommend rollback (de-activation + grant revocation) if DQ fails.
+
+  tenant_model:
+    id: 2
+    display_name: "Tenant-specific model changes"
+    description: >
+      Changes to Gold models, dbt models, or Silver views that are scoped
+      exclusively to a single tenant's Gold schema. Changes to a tenant's
+      DQ contracts that do not modify the shared baseline.
+    promotion_path:
+      - dev
+      - staging
+      - prod
+    sla_hours: 24
+    auto_promote: false
+    required_approvers:
+      - role: "engineer"
+        minimum_count: 1
+    staging_hold_hours: 4
+    canary_hold_hours: 0
+    mandatory_wait_days: 0
+    rollback_runbook: "promotion/runbooks/rollback_tenant_model.md"
+    auto_rollback_window_hours: 12
+    auto_rollback_threshold:
+      dq_failure_rate_pct: 10
+      row_count_delta_pct: 30
+    files_in_scope:
+      - "templates/pipelines/gold_analytics.sql.j2"
+      - "models/gold_*/**"
+      - "dbt/models/gold_*/**"
+    notes: >
+      One engineer reviewer is required. The staging agent compares Gold
+      output against the production baseline snapshot before promotion.
+      The reviewer must confirm the diff is expected before approving.
+
+  shared_layer:
+    id: 3
+    display_name: "Shared-layer changes"
+    description: >
+      Any change to Bronze ingestion logic, Silver MERGE logic, Vault hub or
+      satellite definitions, shared Gold models, the Feature Store schema,
+      or any pipeline template that affects all tenants.
+    promotion_path:
+      - dev
+      - staging
+      - canary
+      - prod
+    sla_hours: 120
+    auto_promote: false
+    required_approvers:
+      - role: "engineer"
+        minimum_count: 2
+    staging_hold_hours: 24
+    canary_hold_hours: 24
+    mandatory_wait_days: 0
+    canary_tenant_config: "promotion/canary_tenant.yml"
+    rollback_runbook: "promotion/runbooks/rollback_shared_layer.md"
+    auto_rollback_window_hours: 48
+    auto_rollback_threshold:
+      dq_failure_rate_pct: 2
+      row_count_delta_pct: 10
+      schema_drift_detected: true
+    files_in_scope:
+      - "templates/pipelines/bronze_ingestion.sql.j2"
+      - "templates/pipelines/silver_merge.sql.j2"
+      - "templates/pipelines/vault_hub.sql.j2"
+      - "dbt/models/bronze/**"
+      - "dbt/models/silver/**"
+      - "dbt/models/vault/**"
+      - "dbt/models/feature_store/**"
+      - "orchestrator/**"
+    notes: >
+      These changes affect every tenant simultaneously. The canary tenant
+      defined in canary_tenant.yml must process 24 hours of data successfully
+      before promotion to prod. Both engineer reviewers must be from different
+      teams (one data engineer, one analytics engineer or platform engineer).
+      The staging agent diff must show zero unintended schema changes.
+
+  governance:
+    id: 4
+    display_name: "Governance changes"
+    description: >
+      Unity Catalog grant modifications, row-level security policy changes,
+      schema deletions, catalog-level permission changes, changes to AGENTS.md
+      or promotion/categories.yml, or any change that could reduce data
+      visibility for an existing tenant.
+    promotion_path:
+      - dev
+      - staging
+      - prod
+    sla_hours: 240
+    auto_promote: false
+    required_approvers:
+      - role: "senior_engineer"
+        minimum_count: 1
+      - role: "data_platform_lead"
+        minimum_count: 1
+    staging_hold_hours: 24
+    canary_hold_hours: 0
+    mandatory_wait_days: 7
+    rollback_runbook: "promotion/runbooks/rollback_governance.md"
+    auto_rollback_window_hours: 0
+    notes: >
+      The 7-day mandatory wait is a security and compliance requirement.
+      It allows all affected tenant owners to be notified and raise objections
+      before the change takes effect. The staging hold and mandatory wait run
+      concurrently; the 7-day clock starts when the PR is merged to staging.
+      No automated rollback for this category; rollback requires manual
+      execution of the runbook by the Data Platform Lead.
+    files_in_scope:
+      - "AGENTS.md"
+      - "promotion/categories.yml"
+      - "**/*.grants.sql"
+      - "**/*.rls.sql"
+      - "orchestrator/handlers/register_tenant.py"
+      - "orchestrator/handlers/provision_grants.py"
+      - "databricks.yml"
+
+  emergency_hotfix:
+    id: 5
+    display_name: "Emergency hotfix"
+    description: >
+      A production incident requiring immediate remediation where the standard
+      promotion path would cause unacceptable downtime or data loss. This
+      category must not be used for convenience; it exists for genuine
+      production emergencies only.
+    promotion_path:
+      - prod
+    sla_hours: 0.5
+    auto_promote: false
+    required_approvers:
+      - role: "senior_engineer_oncall"
+        minimum_count: 1
+    staging_hold_hours: 0
+    canary_hold_hours: 0
+    mandatory_wait_days: 0
+    retroactive_review_hours: 48
+    rollback_runbook: "promotion/runbooks/rollback_hotfix.md"
+    auto_rollback_window_hours: 4
+    files_in_scope:
+      - "**/*"
+    notes: >
+      The on-call senior engineer must approve and deploy within 30 minutes.
+      A mandatory retroactive review must be completed within 48 hours; this
+      review must determine whether the root cause has been addressed and
+      whether a follow-up change in the correct category is required.
+      The emergency-hotfix.yml workflow will automatically open a retroactive
+      review ticket 48 hours after deployment. Misuse of this category is a
+      process violation; the retroactive review will flag it.
+
+
+# Cross-category rules
+
+cross_category_rules:
+
+  ambiguity_resolution:
+    rule: >
+      If a pull request touches files from multiple categories, classify it
+      as the highest-risk category present. State the ambiguity explicitly in
+      the PR comment.
+
+  split_pr_recommendation:
+    rule: >
+      If a PR touches Category 3 or 4 files alongside Category 1 or 2 files,
+      the promotion classifier should recommend splitting the PR unless the
+      changes are causally coupled.
+
+  rollback_authority:
+    rule: >
+      Rollback decisions for all categories require human authorisation.
+      The post-deployment agent may recommend rollback; it may not execute it.
+      The on-call engineer executes rollbacks using the relevant runbook.
