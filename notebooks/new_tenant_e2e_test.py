@@ -561,8 +561,7 @@ displayHTML("<h3>Acceptance criterion 4: Gold — tables</h3>")
 display(spark.sql(f"""
     SELECT table_name,
            table_type,
-           table_properties['quality.layer']   AS layer,
-           table_properties['quality.refresh'] AS refresh_cadence
+           created
     FROM {CATALOG}.information_schema.tables
     WHERE table_schema = 'gold_{SAFE_TENANT_ID}'
     ORDER BY table_name
@@ -758,11 +757,9 @@ display(spark.sql(f"""
 displayHTML("<h3>All catalog objects created for nova-finance</h3>")
 display(spark.sql(f"""
     SELECT
-        t.table_schema                                     AS schema_name,
+        t.table_schema AS schema_name,
         t.table_name,
         t.table_type,
-        COALESCE(t.table_properties['quality.layer'],   '') AS layer,
-        COALESCE(t.table_properties['quality.dv_type'], '') AS dv_type,
         t.created
     FROM {CATALOG}.information_schema.tables AS t
     WHERE t.table_schema IN ('bronze','silver','vault','gold_{SAFE_TENANT_ID}','monitoring')

@@ -186,11 +186,10 @@ print("=" * 55)
 print("DATA VAULT TABLES")
 print("=" * 55)
 display(spark.sql(f"""
-    SELECT table_schema, table_name,
-           table_properties['quality.dv_type'] AS dv_type
+    SELECT table_schema, table_name, table_type
     FROM {CATALOG}.information_schema.tables
     WHERE table_schema = 'vault'
-      AND table_name LIKE '%{tid}%'
+      AND table_name LIKE '%{safe_tid}%'
     ORDER BY table_name
 """))
 
@@ -338,10 +337,9 @@ displayHTML(html)
 
 all_tables = spark.sql(f"""
     SELECT table_schema AS schema,
-           table_name   AS table_name,
+           table_name,
            table_type,
-           COALESCE(table_properties['quality.layer'],   '') AS layer,
-           COALESCE(table_properties['quality.dv_type'], '') AS dv_type
+           created
     FROM {CATALOG}.information_schema.tables
     WHERE table_schema IN ('bronze','silver','vault','gold_{safe_tid}','monitoring')
     ORDER BY table_schema, table_name
