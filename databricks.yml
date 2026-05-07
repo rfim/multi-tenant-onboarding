@@ -1,9 +1,37 @@
 bundle:
   name: multi-tenant-onboarding
 
-# Target environments. The active target is selected with:
-#   databricks bundle deploy --target <name>
+# ---------------------------------------------------------------------------
+# Artifacts — build the Python wheel before deploy
+# ---------------------------------------------------------------------------
+artifacts:
+  onboarding_wheel:
+    type: whl
+    path: .
+    build: "pip wheel . --no-deps -w dist/ -q"
+    files:
+      - source: dist/multi_tenant_onboarding-*.whl
 
+# ---------------------------------------------------------------------------
+# Bundle variables (resolved per target)
+# ---------------------------------------------------------------------------
+variables:
+  workspace_host:
+    description: "Databricks workspace URL  (e.g. https://adb-xxx.azuredatabricks.net)"
+  catalog:
+    description: "Unity Catalog name for this environment"
+  env:
+    description: "Environment identifier: dev | staging | prod"
+  sql_warehouse_id:
+    description: "SQL warehouse ID used by dbt_task and notebook SQL"
+  onboarding_queue:
+    description: "Message queue / topic name for onboarding events"
+  slack_channel_prefix:
+    description: "Prefix for Slack channel names"
+
+# ---------------------------------------------------------------------------
+# Targets
+# ---------------------------------------------------------------------------
 targets:
   dev:
     mode: development
@@ -39,97 +67,216 @@ targets:
       onboarding_queue: onboarding-prod
       slack_channel_prefix: "#"
 
-variables:
-  workspace_host:
-    description: "Databricks workspace URL"
-  catalog:
-    description: "Unity Catalog name for this environment"
-  env:
-    description: "Environment identifier: dev | staging | prod"
-  onboarding_queue:
-    description: "Message queue name for onboarding events"
-  slack_channel_prefix:
-    description: "Prefix for Slack channel names"
-
-# Workflow definitions are imported from individual resource files.
-# Each workflow maps to a component in this repository.
-
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
 resources:
+
+  # ── Jobs ──────────────────────────────────────────────────────────────────
+  # Notebooks are synced automatically as workspace files by the bundle.
+  # Tasks reference them via ${workspace.root_path}/files/notebooks/<name>.
   jobs:
+
+    # ------------------------------------------------------------------
+    # 1. Onboarding orchestrator — state machine driven from a notebook
+    # ------------------------------------------------------------------
     onboarding_orchestrator:
       name: "[${var.env}] Onboarding Orchestrator"
       description: "Deterministic state machine that processes tenant onboarding events."
+      max_concurrent_runs: 1
+
       tasks:
         - task_key: run_state_machine
-          python_wheel_task:
-            package_name: orchestrator
-            entry_point: run
-            parameters:
-              - "--env"
-              - "${var.env}"
-              - "--catalog"
-              - "${var.catalog}"
+          notebook_task:
+            notebook_path: ${workspace.root_path}/files/notebooks/onboarding_demo.py
+            base_parameters:
+              catalog: ${var.catalog}
+              env:     ${var.env}
           job_cluster_key: onboarding_cluster
-          timeout_seconds: 3600
-          retry_on_timeout: false
-          max_retries: 0
+
       job_clusters:
         - job_cluster_key: onboarding_cluster
           new_cluster:
-            spark_version: "14.3.x-scala2.12"
+            spark_version: "15.4.x-scala2.12"
             node_type_id: "m5d.large"
             num_workers: 1
             spark_conf:
               "spark.databricks.delta.retentionDurationCheck.enabled": "false"
             data_security_mode: SINGLE_USER
+            spark_env_vars:
+              CATALOG: ${var.catalog}
+              ENV:     ${var.env}
 
+      permissions:
+        - level: CAN_VIEW
+          group_name: data-engineers
+
+    # ------------------------------------------------------------------
+    # 2. nova-finance E2E acceptance test — run on demand / CI
+    # ------------------------------------------------------------------
+    nova_finance_e2e:
+      name: "[${var.env}] nova-finance E2E Test"
+      description: "Runs the full Bronze → Silver → Gold → Dashboard acceptance test for nova-finance."
+
+      tasks:
+        - task_key: e2e_test
+          notebook_task:
+            notebook_path: ${workspace.root_path}/files/notebooks/new_tenant_e2e_test.py
+            base_parameters:
+              catalog: ${var.catalog}
+          job_cluster_key: onboarding_cluster
+
+      job_clusters:
+        - job_cluster_key: onboarding_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "m5d.large"
+            num_workers: 1
+            data_security_mode: SINGLE_USER
+            spark_env_vars:
+              CATALOG: ${var.catalog}
+              ENV:     ${var.env}
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: data-engineers
+
+    # ------------------------------------------------------------------
+    # 3. dbt Gold layer — nova-finance
+    # ------------------------------------------------------------------
+    dbt_gold_nova_finance:
+      name: "[${var.env}] dbt Gold — nova-finance"
+      description: "Runs and tests dbt Gold models for nova-finance."
+      schedule:
+        quartz_cron_expression: "0 0 3 * * ?"   # 03:00 UTC daily
+        timezone_id: "UTC"
+        pause_status: UNPAUSED
+
+      tasks:
+        - task_key: dbt_run
+          dbt_task:
+            project_directory: dbt/
+            commands:
+              - "dbt deps"
+              - "dbt run  --select gold_nova_finance --target ${var.env}"
+              - "dbt test --select gold_nova_finance --target ${var.env}"
+            warehouse_id: ${var.sql_warehouse_id}
+            catalog: ${var.catalog}
+            schema: gold_nova_finance
+          job_cluster_key: dbt_cluster
+
+      job_clusters:
+        - job_cluster_key: dbt_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "m5d.large"
+            num_workers: 0    # single-node is enough for dbt CLI
+            data_security_mode: SINGLE_USER
+            spark_env_vars:
+              DBT_CATALOG: ${var.catalog}
+              DBT_TARGET:  ${var.env}
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: data-engineers
+        - level: CAN_VIEW
+          group_name: analysts
+
+    # ------------------------------------------------------------------
+    # 4. Deviation detector agent (wheel task)
+    # ------------------------------------------------------------------
     deviation_detector:
       name: "[${var.env}] Deviation Detector"
       description: "Agentic schema deviation detection. Outputs draft PRs only."
+
       tasks:
         - task_key: detect_deviations
           python_wheel_task:
-            package_name: agents.deviation_detector
-            entry_point: run
+            package_name: multi_tenant_onboarding
+            entry_point: deviation-detector
             parameters:
               - "--env"
               - "${var.env}"
               - "--catalog"
               - "${var.catalog}"
+          libraries:
+            - whl: dist/multi_tenant_onboarding-*.whl
           job_cluster_key: agent_cluster
           timeout_seconds: 1800
           max_retries: 1
 
+      job_clusters:
+        - job_cluster_key: agent_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "m5d.xlarge"
+            num_workers: 2
+            data_security_mode: SINGLE_USER
+            spark_env_vars:
+              CATALOG: ${var.catalog}
+              ENV:     ${var.env}
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: data-engineers
+
+    # ------------------------------------------------------------------
+    # 5. DQ anomaly detector agent (wheel task, scheduled)
+    # ------------------------------------------------------------------
     anomaly_detector:
       name: "[${var.env}] DQ Anomaly Detector"
       description: "Agentic data quality anomaly detection. Outputs alerts and draft PRs."
       schedule:
-        quartz_cron_expression: "0 0 6 * * ?"
+        quartz_cron_expression: "0 0 6 * * ?"   # 06:00 UTC daily
         timezone_id: "UTC"
+        pause_status: UNPAUSED
+
       tasks:
         - task_key: detect_anomalies
           python_wheel_task:
-            package_name: agents.anomaly_detector
-            entry_point: run
+            package_name: multi_tenant_onboarding
+            entry_point: anomaly-detector
             parameters:
               - "--env"
               - "${var.env}"
               - "--catalog"
               - "${var.catalog}"
+          libraries:
+            - whl: dist/multi_tenant_onboarding-*.whl
           job_cluster_key: agent_cluster
           timeout_seconds: 3600
 
+      job_clusters:
+        - job_cluster_key: agent_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "m5d.xlarge"
+            num_workers: 2
+            data_security_mode: SINGLE_USER
+            spark_env_vars:
+              CATALOG: ${var.catalog}
+              ENV:     ${var.env}
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: data-engineers
+
+    # ------------------------------------------------------------------
+    # 6. Changelog summariser agent (wheel task, weekly)
+    # ------------------------------------------------------------------
     changelog_summariser:
       name: "[${var.env}] Changelog Summariser"
       description: "Generates human-readable change summaries for stakeholders."
       schedule:
-        quartz_cron_expression: "0 0 8 ? * MON"
+        quartz_cron_expression: "0 0 8 ? * MON"   # 08:00 UTC every Monday
         timezone_id: "UTC"
+        pause_status: UNPAUSED
+
       tasks:
         - task_key: summarise_changelogs
           python_wheel_task:
-            package_name: agents.changelog_summariser
-            entry_point: run
+            package_name: multi_tenant_onboarding
+            entry_point: changelog-summariser
             parameters:
               - "--env"
               - "${var.env}"
@@ -137,13 +284,24 @@ resources:
               - "${var.catalog}"
               - "--lookback-days"
               - "7"
+          libraries:
+            - whl: dist/multi_tenant_onboarding-*.whl
           job_cluster_key: agent_cluster
           timeout_seconds: 1800
 
       job_clusters:
         - job_cluster_key: agent_cluster
           new_cluster:
-            spark_version: "14.3.x-scala2.12"
+            spark_version: "15.4.x-scala2.12"
             node_type_id: "m5d.xlarge"
             num_workers: 2
             data_security_mode: SINGLE_USER
+            spark_env_vars:
+              CATALOG: ${var.catalog}
+              ENV:     ${var.env}
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: data-engineers
+        - level: CAN_VIEW
+          group_name: analysts
