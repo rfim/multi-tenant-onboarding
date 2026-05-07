@@ -30,6 +30,7 @@ def run(ctx, spark: SparkSession):
 
     logger.info("Registering tenant %s in catalog %s", tenant_id, catalog)
 
+    _ensure_catalog(catalog, spark)
     _ensure_monitoring_schema(catalog, spark)
     _ensure_monitoring_tables(catalog, spark)
     _create_gold_schema(catalog, tenant_id, spark)
@@ -40,6 +41,32 @@ def run(ctx, spark: SparkSession):
 
     logger.info("Tenant %s registered.", tenant_id)
     return replace(ctx, metadata={**ctx.metadata, "gold_schema": f"gold_{tenant_id}"})
+
+
+# ── Catalog bootstrap ─────────────────────────────────────────────────────────
+
+def _ensure_catalog(catalog: str, spark: SparkSession) -> None:
+    try:
+        spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
+        logger.info("Catalog ready: %s", catalog)
+    except Exception as exc:
+        # CREATE CATALOG requires metastore admin. If the catalog already
+        # exists (common in shared workspaces), the existence check passes
+        # and we can proceed safely.
+        existing = spark.sql(
+            f"SELECT catalog_name FROM system.information_schema.catalogs "
+            f"WHERE catalog_name = '{catalog}'"
+        ).collect()
+        if not existing:
+            raise RuntimeError(
+                f"Catalog '{catalog}' does not exist and could not be created "
+                f"(metastore admin required). Create it in the Databricks UI "
+                f"or ask your workspace admin. Original error: {exc}"
+            ) from exc
+        logger.warning(
+            "CREATE CATALOG skipped (likely lacks privilege) — catalog '%s' confirmed to exist.",
+            catalog,
+        )
 
 
 # ── Monitoring schema and tables ──────────────────────────────────────────────

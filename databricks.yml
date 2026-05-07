@@ -22,6 +22,9 @@ variables:
     description: "Unity Catalog name for this environment"
   env:
     description: "Environment identifier: dev | staging | prod"
+  tenant_id:
+    description: "Tenant ID to onboard (passed to the orchestrator notebook)"
+    default: "acme-corp"
   sql_warehouse_id:
     description: "SQL warehouse ID used by dbt_task and notebook SQL"
   onboarding_queue:
@@ -90,8 +93,9 @@ resources:
           notebook_task:
             notebook_path: ${workspace.root_path}/files/notebooks/onboarding_demo.py
             base_parameters:
-              catalog: ${var.catalog}
-              env:     ${var.env}
+              catalog:   ${var.catalog}
+              env:       ${var.env}
+              tenant_id: ${var.tenant_id}
           job_cluster_key: onboarding_cluster
 
       job_clusters:
@@ -123,7 +127,8 @@ resources:
           notebook_task:
             notebook_path: ${workspace.root_path}/files/notebooks/new_tenant_e2e_test.py
             base_parameters:
-              catalog: ${var.catalog}
+              catalog:   ${var.catalog}
+              tenant_id: ${var.tenant_id}
           job_cluster_key: onboarding_cluster
 
       job_clusters:

@@ -82,12 +82,26 @@ print(f"SIMULATE        : {os.environ['SIMULATE']}")
 
 # COMMAND ----------
 
-CATALOG   = spark.conf.get("spark.databricks.clusterUsageTags.clusterOwnerOrgId", "platform_catalog_dev")
-CATALOG   = "platform_catalog_dev"   # override if needed
+# Read parameters passed by the DAB job (or fall back to defaults for interactive use)
+try:
+    dbutils.widgets.text("catalog",   "platform_catalog_dev")
+    dbutils.widgets.text("env",       "dev")
+    dbutils.widgets.text("tenant_id", "acme-corp")
+    CATALOG   = dbutils.widgets.get("catalog")
+    ENV       = dbutils.widgets.get("env")
+    _TENANT   = dbutils.widgets.get("tenant_id")
+except Exception:
+    CATALOG   = "platform_catalog_dev"
+    ENV       = "dev"
+    _TENANT   = "acme-corp"
+
+print(f"CATALOG   : {CATALOG}")
+print(f"ENV       : {ENV}")
+print(f"TENANT_ID : {_TENANT}")
 
 TENANT_PAYLOAD = {
-    "tenant_id": "acme-corp",
-    "env":       "dev",
+    "tenant_id": _TENANT,
+    "env":       ENV,
     "catalog":   CATALOG,
     "source_schema": {
         "event_id":        {"type": "STRING",    "nullable": False},

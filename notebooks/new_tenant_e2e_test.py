@@ -58,8 +58,15 @@ if MANUAL_CODEX and not os.environ.get("CODEX_AUTH_JSON"):
 os.environ["SIMULATE"]    = "0" if os.environ.get("GITHUB_TOKEN") else "1"
 os.environ["GITHUB_REPO"] = "rfim/multi-tenant-onboarding"
 
-TENANT_ID = "nova-finance"
-CATALOG   = "platform_catalog_dev"   # change to platform_catalog for prod
+# Read parameters from the DAB job (or fall back to defaults for interactive use)
+try:
+    dbutils.widgets.text("catalog",   "platform_catalog_dev")
+    dbutils.widgets.text("tenant_id", "nova-finance")
+    CATALOG   = dbutils.widgets.get("catalog")
+    TENANT_ID = dbutils.widgets.get("tenant_id")
+except Exception:
+    CATALOG   = "platform_catalog_dev"
+    TENANT_ID = "nova-finance"
 
 print(f"Tenant  : {TENANT_ID}")
 print(f"Catalog : {CATALOG}")
