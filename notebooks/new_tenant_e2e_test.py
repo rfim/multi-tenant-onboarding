@@ -171,6 +171,7 @@ display(spark.sql(f"""
 # COMMAND ----------
 
 import uuid
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType
 
 EVENT_TYPES = ["submission", "review", "escalation", "decision", "notification"]
 STATUSES    = ["pending", "in_progress", "pending_audit", "escalated",
@@ -204,20 +205,27 @@ for i in range(500):
         TENANT_ID,
         str(uuid.uuid4()),
         evt_type,
-        ts.strftime("%Y-%m-%d %H:%M:%S"),
+        ts.replace(tzinfo=None),                         # naive UTC datetime
         source,
         payload,
-        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        datetime.now(timezone.utc).replace(tzinfo=None), # naive UTC datetime
         f"notebook-seed-{i // 100}",
         "batch-seed-001",
     ))
 
-columns = [
-    "tenant_id", "event_id", "event_type", "event_timestamp",
-    "source_system", "payload", "_ingested_at", "_source_file", "_batch_id",
-]
+bronze_schema = StructType([
+    StructField("tenant_id",       StringType(),    False),
+    StructField("event_id",        StringType(),    False),
+    StructField("event_type",      StringType(),    False),
+    StructField("event_timestamp", TimestampType(), False),
+    StructField("source_system",   StringType(),    True),
+    StructField("payload",         StringType(),    True),
+    StructField("_ingested_at",    TimestampType(), True),
+    StructField("_source_file",    StringType(),    True),
+    StructField("_batch_id",       StringType(),    True),
+])
 
-df_bronze = spark.createDataFrame(rows, schema=columns)
+df_bronze = spark.createDataFrame(rows, schema=bronze_schema)
 df_bronze.write \
     .format("delta") \
     .mode("append") \
