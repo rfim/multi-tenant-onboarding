@@ -1,23 +1,9 @@
 """
 Handler: DASHBOARDS_SCAFFOLDED -> QUALITY_SCAFFOLDED
 
-Instantiates per-tenant data quality contracts from the baseline templates.
-Baseline contracts apply identically to every tenant; this handler renders
-them with the tenant's catalog and schema parameters.
-
-DQ stack:
-  - Great Expectations: column-level expectations (null rates, value ranges,
-    format patterns). Suite per layer: bronze, silver, gold.
-  - dbt tests: referential integrity and business-rule assertions.
-
-Output:
-  - GE expectation suite files written to dq/expectations/<tenant_id>/
-  - dbt schema.yml files written to dbt/models/<schema>/<tenant_id>/
-  - Both are committed to a branch and included in the pipeline scaffold PR
-    (or a separate PR if the pipeline PR has already been merged).
-
-Per-tenant DQ results are written to monitoring.dq_results, partitioned by
-tenant_id and run_date.
+Renders DQ contract templates and registers them in monitoring.dq_contracts.
+The rendered YAML files are written to the repo working tree so the next
+git commit (via the pipeline PR) includes them.
 """
 
 from __future__ import annotations
@@ -34,77 +20,95 @@ logger = logging.getLogger(__name__)
 CONTRACTS_DIR = Path(__file__).parents[2] / "templates" / "quality_contracts"
 
 CONTRACT_TEMPLATES = [
-    ("bronze_contract.yml.j2",  "bronze"),
-    ("silver_contract.yml.j2",  "silver"),
-    ("gold_contract.yml.j2",    "gold"),
+    ("bronze_contract.yml.j2", "bronze"),
+    ("silver_contract.yml.j2", "silver"),
+    ("gold_contract.yml.j2",   "gold"),
 ]
 
 
 def run(ctx, spark: SparkSession):
-    """
-    Renders DQ contracts and registers them in the monitoring schema.
-
-    Args:
-        ctx: TenantContext with state == DASHBOARDS_SCAFFOLDED
-        spark: active SparkSession
-
-    Returns:
-        Updated TenantContext with dq_contract_paths in metadata.
-    """
     tenant_id = ctx.tenant_id
-    catalog = ctx.catalog
+    catalog   = ctx.catalog
 
     logger.info("Scaffolding DQ contracts for tenant %s", tenant_id)
 
-    rendered_contracts = _render_contracts(ctx)
-    _write_contracts_to_repo(tenant_id, rendered_contracts)
-    _register_contracts(catalog, tenant_id, rendered_contracts, spark)
+    rendered = _render_contracts(ctx)
+    _write_contracts(rendered)
+    _register_contracts(catalog, tenant_id, rendered, spark)
+    _log_change(catalog, tenant_id, f"{len(rendered)} DQ contracts registered", spark)
 
-    logger.info("Tenant %s: %d DQ contracts instantiated.", tenant_id, len(rendered_contracts))
+    logger.info("Tenant %s: %d DQ contracts instantiated.", tenant_id, len(rendered))
 
-    return replace(
-        ctx,
-        metadata={**ctx.metadata, "dq_contract_paths": list(rendered_contracts.keys())},
-    )
+    return replace(ctx, metadata={
+        **ctx.metadata,
+        "dq_contract_paths": list(rendered.keys()),
+    })
 
 
 def _render_contracts(ctx) -> dict[str, str]:
-    """Renders each contract template with tenant parameters."""
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime.now(timezone.utc)
     env = Environment(
         loader=FileSystemLoader(str(CONTRACTS_DIR)),
         undefined=StrictUndefined,
         keep_trailing_newline=True,
     )
     vars_ = {
-        "tenant_id": ctx.tenant_id,
-        "catalog": ctx.catalog,
-        "gold_schema": ctx.metadata.get("gold_schema", f"gold_{ctx.tenant_id}"),
+        "tenant_id":         ctx.tenant_id,
+        "catalog":           ctx.catalog,
+        "gold_schema":       ctx.metadata.get("gold_schema", f"gold_{ctx.tenant_id}"),
+        "now_utc":           now.isoformat(),
+        "lookback_start":    (now - timedelta(days=90)).isoformat(),
+        "tomorrow":          (now + timedelta(days=1)).isoformat(),
+        "yesterday_minus_2h": (now - timedelta(hours=26)).isoformat(),
+        "today":             now.date().isoformat(),
     }
     rendered = {}
     for tpl_name, layer in CONTRACT_TEMPLATES:
-        template = env.get_template(tpl_name)
         output_path = f"dq/expectations/{ctx.tenant_id}/{layer}_contract.yml"
-        rendered[output_path] = template.render(**vars_)
+        rendered[output_path] = env.get_template(tpl_name).render(**vars_)
     return rendered
 
 
-def _write_contracts_to_repo(tenant_id: str, contracts: dict[str, str]) -> None:
-    """
-    Writes rendered contract files to the repository branch opened by
-    scaffold_pipelines. If that PR has already been merged, opens a new branch.
-    """
-    # TODO: write files to git branch onboard/<tenant_id>/pipelines or
-    #       onboard/<tenant_id>/quality if the pipelines branch is gone
-    pass
+def _write_contracts(contracts: dict[str, str]) -> None:
+    """Writes rendered contract files to the repo working tree."""
+    repo_root = Path(__file__).parents[2]
+    for rel_path, content in contracts.items():
+        dest = repo_root / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content)
+        logger.info("Written: %s", rel_path)
 
 
 def _register_contracts(
-    catalog: str,
-    tenant_id: str,
-    contracts: dict[str, str],
-    spark: SparkSession,
+    catalog: str, tenant_id: str, contracts: dict[str, str], spark: SparkSession
 ) -> None:
-    """Appends contract metadata to monitoring.dq_contracts."""
-    # TODO: write rows to monitoring.dq_contracts with:
-    #   tenant_id, layer, contract_path, created_at, is_active=true
-    pass
+    for contract_path, _ in contracts.items():
+        layer = Path(contract_path).stem.replace("_contract", "")
+        spark.sql(f"""
+            MERGE INTO {catalog}.monitoring.dq_contracts AS t
+            USING (
+                SELECT
+                    '{tenant_id}'    AS tenant_id,
+                    '{layer}'        AS layer,
+                    '{contract_path}' AS contract_path,
+                    CURRENT_TIMESTAMP() AS created_at,
+                    true             AS is_active
+            ) AS s
+            ON t.tenant_id = s.tenant_id AND t.layer = s.layer
+            WHEN NOT MATCHED THEN
+                INSERT (tenant_id, layer, contract_path, created_at, is_active)
+                VALUES (s.tenant_id, s.layer, s.contract_path, s.created_at, s.is_active)
+        """)
+    logger.debug("Registered %d contracts for tenant %s", len(contracts), tenant_id)
+
+
+def _log_change(catalog: str, tenant_id: str, description: str, spark: SparkSession) -> None:
+    spark.sql(f"""
+        INSERT INTO {catalog}.monitoring.tenant_change_log
+            (tenant_id, change_timestamp, change_type, component, description, env)
+        VALUES
+            ('{tenant_id}', CURRENT_TIMESTAMP(), 'QUALITY_SCAFFOLDED',
+             'scaffold_quality', '{description}', 'dev')
+    """)

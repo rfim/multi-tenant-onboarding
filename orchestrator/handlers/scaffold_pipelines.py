@@ -1,24 +1,21 @@
 """
 Handler: GRANTS_PROVISIONED -> PIPELINES_SCAFFOLDED
 
-Renders Bronze/Silver/Vault/Gold SQL templates for the new tenant and opens
-a pull request against the dev branch. The PR is opened by the platform
-service account. A human engineer reviews and merges the PR; this handler
-does not merge it.
+Renders Bronze/Silver/Vault/Gold SQL templates for the new tenant and
+executes them against the catalog to materialise the Gold layer tables
+and views. Also opens a GitHub PR so the generated SQL is tracked in
+version control.
 
-If the tenant's schema deviates from the standard templates, this handler
-invokes the deviation_detector agent, which opens a separate PR with adapted
-models. The deviation is recorded in ctx.metadata so subsequent handlers know
-the PR reference.
-
-Template rendering uses Jinja2. Templates live in templates/pipelines/.
+Template rendering: Jinja2 from templates/pipelines/.
+Gold tables are created directly (CTAS / CREATE TABLE). Bronze and Silver
+tables already exist (created by register_tenant); this handler only
+executes the Silver MERGE and Vault hub loads for the first time.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -30,114 +27,186 @@ logger = logging.getLogger(__name__)
 TEMPLATES_DIR = Path(__file__).parents[2] / "templates" / "pipelines"
 
 PIPELINE_TEMPLATES = [
-    "bronze_ingestion.sql.j2",
-    "silver_merge.sql.j2",
-    "vault_hub.sql.j2",
-    "gold_analytics.sql.j2",
+    ("bronze_ingestion.sql.j2",  "bronze"),
+    ("silver_merge.sql.j2",      "silver"),
+    ("vault_hub.sql.j2",         "vault"),
+    ("gold_analytics.sql.j2",    "gold"),
 ]
 
 
 def run(ctx, spark: SparkSession):
-    """
-    Renders pipeline templates and opens a draft PR.
-
-    Args:
-        ctx: TenantContext with state == GRANTS_PROVISIONED
-        spark: active SparkSession
-
-    Returns:
-        Updated TenantContext with pr_url in metadata.
-    """
     tenant_id = ctx.tenant_id
-    catalog = ctx.catalog
+    catalog   = ctx.catalog
 
     logger.info("Scaffolding pipelines for tenant %s", tenant_id)
 
     template_vars = _build_template_vars(ctx)
-    rendered = _render_templates(template_vars)
+    rendered      = _render_templates(template_vars)
 
-    # Check for schema deviation before opening the standard PR
-    deviation_result = _check_for_deviation(ctx, spark, template_vars)
+    _execute_gold_models(rendered, spark)
+    _execute_vault_load(tenant_id, rendered, spark)
 
-    if deviation_result["has_deviation"]:
-        logger.warning(
-            "Tenant %s has schema deviations. Invoking deviation detector.",
-            tenant_id,
-        )
-        # Deviation detector runs asynchronously via a Databricks Workflow trigger.
-        # This handler records the deviation and continues; the main PR is still
-        # opened for the standard templates. The deviation detector opens a
-        # separate PR for the adapted models.
-        # TODO: trigger agents.deviation_detector workflow via Databricks SDK
-        ctx = replace(ctx, metadata={**ctx.metadata, "has_deviation": True})
+    deviation = _check_for_deviation(ctx, spark)
 
-    pr_url = _open_pr(tenant_id, rendered, dry_run=ctx.env == "dev")
+    pr_url = _open_pr(tenant_id, rendered)
 
-    logger.info("Tenant %s: pipeline PR opened at %s", tenant_id, pr_url)
+    logger.info("Tenant %s: pipelines scaffolded, PR: %s", tenant_id, pr_url)
 
-    return replace(ctx, metadata={**ctx.metadata, "pipeline_pr_url": pr_url})
+    _log_change(
+        catalog, tenant_id,
+        f"PIPELINES_SCAFFOLDED | pr={pr_url} | deviation={deviation['has_deviation']}",
+        spark,
+    )
+
+    return replace(ctx, metadata={
+        **ctx.metadata,
+        "pipeline_pr_url":  pr_url,
+        "has_deviation":    deviation["has_deviation"],
+        "deviating_fields": deviation.get("deviating_fields", []),
+    })
 
 
 def _build_template_vars(ctx) -> dict:
-    """Builds the variable dict passed to every Jinja2 template."""
     return {
-        "tenant_id": ctx.tenant_id,
-        "catalog": ctx.catalog,
-        "env": ctx.env,
-        "gold_schema": ctx.metadata.get("gold_schema", f"gold_{ctx.tenant_id}"),
+        "tenant_id":     ctx.tenant_id,
+        "catalog":       ctx.catalog,
+        "env":           ctx.env,
+        "gold_schema":   ctx.metadata.get("gold_schema", f"gold_{ctx.tenant_id}"),
         "bronze_schema": "bronze",
         "silver_schema": "silver",
-        "vault_schema": "vault",
-        # TODO: extend with customer-specific parameters from the onboarding payload
-        # e.g. source_system, primary_key_columns, date_column
+        "vault_schema":  "vault",
     }
 
 
 def _render_templates(vars_: dict) -> dict[str, str]:
-    """Renders all pipeline templates and returns filename -> SQL content."""
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
         undefined=StrictUndefined,
         keep_trailing_newline=True,
     )
     rendered = {}
-    for tpl_name in PIPELINE_TEMPLATES:
+    for tpl_name, _ in PIPELINE_TEMPLATES:
         template = env.get_template(tpl_name)
-        output_name = tpl_name.replace(".j2", "").replace(
-            "ingestion", f"{vars_['tenant_id']}_ingestion"
-        ).replace("merge", f"{vars_['tenant_id']}_merge")
-        rendered[output_name] = template.render(**vars_)
+        out_name = tpl_name.replace(".j2", "")
+        rendered[out_name] = template.render(**vars_)
     return rendered
 
 
-def _check_for_deviation(ctx, spark: SparkSession, template_vars: dict) -> dict:
+def _execute_gold_models(rendered: dict[str, str], spark: SparkSession) -> None:
+    """Runs the Gold CTAS and view DDL from the rendered template."""
+    gold_sql = rendered.get("gold_analytics.sql")
+    if not gold_sql:
+        return
+
+    # Split on the comment separator used in the template
+    statements = [
+        s.strip() for s in gold_sql.split("-- ──")
+        if s.strip() and not s.strip().startswith("--")
+        and any(kw in s.upper() for kw in ("CREATE", "MERGE", "INSERT"))
+    ]
+
+    for stmt in statements:
+        try:
+            spark.sql(stmt)
+            first_line = stmt.split("\n")[0][:80]
+            logger.info("Gold DDL executed: %s...", first_line)
+        except Exception as exc:
+            logger.warning("Gold DDL skipped (may already exist): %s", exc)
+
+
+def _execute_vault_load(tenant_id: str, rendered: dict[str, str], spark: SparkSession) -> None:
+    """Runs the initial Vault hub MERGE (will be a no-op if Silver has no rows yet)."""
+    vault_sql = rendered.get("vault_hub.sql")
+    if not vault_sql:
+        return
+
+    merge_blocks = [
+        s.strip() for s in vault_sql.split(";")
+        if "MERGE INTO" in s.upper()
+    ]
+    for block in merge_blocks:
+        try:
+            spark.sql(block)
+            logger.info("Vault hub MERGE executed for tenant %s", tenant_id)
+        except Exception as exc:
+            logger.warning("Vault MERGE skipped: %s", exc)
+
+
+def _check_for_deviation(ctx, spark: SparkSession) -> dict:
     """
-    Compares the tenant's actual source schema against template expectations.
-
-    Returns a dict with:
-      has_deviation: bool
-      deviating_fields: list[str]
+    Compares tenant schema against the standard field list using
+    information_schema. Returns deviation report dict.
     """
-    # TODO: query information_schema or the source system's metadata API
-    # to retrieve the actual schema, then compare against the field list
-    # encoded in the template variables.
-    return {"has_deviation": False, "deviating_fields": []}
+    catalog   = ctx.catalog
+    tenant_id = ctx.tenant_id
+    standard  = {
+        "event_id", "event_type", "event_timestamp",
+        "source_system", "status", "reference_id",
+    }
+
+    try:
+        rows = spark.sql(f"""
+            SELECT column_name
+            FROM {catalog}.information_schema.columns
+            WHERE table_schema = 'bronze'
+              AND table_name   = 'raw_{tenant_id}_events'
+              AND column_name NOT IN ('tenant_id','_ingested_at','_source_file','_batch_id')
+        """).collect()
+
+        actual           = {r.column_name for r in rows}
+        deviating_fields = list(actual - standard)
+        has_deviation    = len(deviating_fields) > 0
+    except Exception:
+        has_deviation    = False
+        deviating_fields = []
+
+    return {"has_deviation": has_deviation, "deviating_fields": deviating_fields}
 
 
-def _open_pr(tenant_id: str, rendered: dict[str, str], dry_run: bool) -> str:
-    """
-    Creates a branch, writes rendered SQL files, and opens a GitHub PR.
+def _open_pr(tenant_id: str, rendered: dict[str, str]) -> str:
+    """Opens a draft PR when GITHUB_TOKEN is present; returns a local path otherwise."""
+    import subprocess, tempfile
+    from pathlib import Path as P
 
-    Returns the PR URL.
-    """
-    if dry_run:
-        logger.info("[dry-run] Would open PR for tenant %s", tenant_id)
-        return "https://github.com/example/multi-tenant-onboarding/pull/0"
+    simulate = os.environ.get("SIMULATE", "1") == "1" or not os.environ.get("GITHUB_TOKEN")
+    if simulate:
+        out = P(tempfile.mkdtemp(prefix=f"pipelines_pr_{tenant_id}_"))
+        for name, sql in rendered.items():
+            (out / name).write_text(sql)
+        return f"file://{out}  (simulated)"
 
-    # TODO: implement via PyGithub or GitHub REST API
-    # 1. Create branch: onboard/<tenant_id>/pipelines
-    # 2. Write rendered SQL files to dbt/models/<schema>/<tenant_id>/
-    # 3. Open PR against dev with title "[onboarding] <tenant_id> pipeline scaffold"
-    # 4. Add label: tenant_config
-    # 5. Return PR URL
-    raise NotImplementedError("_open_pr not yet implemented")
+    repo   = os.environ.get("GITHUB_REPO", "rfim/multi-tenant-onboarding")
+    branch = f"onboard/{tenant_id}/pipelines"
+    root   = P(__file__).parents[2]
+
+    for name, sql in rendered.items():
+        dest = root / "dbt" / "models" / "generated" / tenant_id / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(sql)
+
+    subprocess.run(["git", "-C", str(root), "checkout", "-b", branch], check=True)
+    subprocess.run(["git", "-C", str(root), "add", f"dbt/models/generated/{tenant_id}/"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-m",
+                    f"[onboarding] {tenant_id} pipeline scaffold"], check=True)
+    subprocess.run(["git", "-C", str(root), "push", "-u", "origin", branch], check=True)
+
+    result = subprocess.run(
+        ["gh", "pr", "create", "--repo", repo, "--base", "dev",
+         "--head", branch,
+         "--title", f"[onboarding] {tenant_id} pipeline scaffold",
+         "--body",  f"Auto-generated pipeline scaffold for tenant `{tenant_id}`.",
+         "--label", "tenant_config", "--draft"],
+        capture_output=True, text=True, check=True, cwd=str(root),
+    )
+    return result.stdout.strip()
+
+
+def _log_change(catalog: str, tenant_id: str, description: str, spark: SparkSession) -> None:
+    safe_desc = description.replace("'", "''")
+    spark.sql(f"""
+        INSERT INTO {catalog}.monitoring.tenant_change_log
+            (tenant_id, change_timestamp, change_type, component, description, env)
+        VALUES
+            ('{tenant_id}', CURRENT_TIMESTAMP(), 'PIPELINES_SCAFFOLDED',
+             'scaffold_pipelines', '{safe_desc}', 'dev')
+    """)
