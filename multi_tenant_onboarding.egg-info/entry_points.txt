@@ -1,0 +1,5 @@
+[console_scripts]
+anomaly-detector = agents.anomaly_detector:run
+changelog-summariser = agents.changelog_summariser:run
+deviation-detector = agents.deviation_detector:run
+orchestrator = orchestrator:run

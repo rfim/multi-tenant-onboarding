@@ -24,11 +24,10 @@ logger = logging.getLogger(__name__)
 def run(ctx, spark: SparkSession):
     tenant_id = ctx.tenant_id
     catalog   = ctx.catalog
-    safe_id   = tenant_id.replace("-", "_")
 
     logger.info("Running pre-activation checks for tenant %s", tenant_id)
 
-    _check_gold_schema(catalog, safe_id, spark)
+    _check_gold_schema(catalog, tenant_id, spark)
     _check_dq_contracts(catalog, tenant_id, spark)
     _mark_active(catalog, tenant_id, spark)
 
@@ -38,19 +37,19 @@ def run(ctx, spark: SparkSession):
     return replace(ctx, metadata={**ctx.metadata, "activated_at": activated_at})
 
 
-def _check_gold_schema(catalog: str, safe_id: str, spark: SparkSession) -> None:
+def _check_gold_schema(catalog: str, tenant_id: str, spark: SparkSession) -> None:
     rows = spark.sql(f"""
         SELECT schema_name
         FROM {catalog}.information_schema.schemata
-        WHERE schema_name = 'gold_{safe_id}'
+        WHERE schema_name = 'gold_{tenant_id}'
     """).collect()
 
     if not rows:
         raise RuntimeError(
-            f"Gold schema {catalog}.gold_{safe_id} does not exist. "
+            f"Gold schema {catalog}.gold_{tenant_id} does not exist. "
             "register_tenant may have failed."
         )
-    logger.debug("Gold schema check passed: gold_%s", safe_id)
+    logger.debug("Gold schema check passed: gold_%s", tenant_id)
 
 
 def _check_dq_contracts(catalog: str, tenant_id: str, spark: SparkSession) -> None:

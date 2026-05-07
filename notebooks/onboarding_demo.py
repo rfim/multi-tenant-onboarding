@@ -29,21 +29,25 @@
 import sys
 import os
 import json
-
-REPO_ROOT = "/Workspace/Repos/rfim/multi-tenant-onboarding"
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
-# Databricks injects spark, dbutils, display, displayHTML at runtime.
-# globals() check avoids referencing undefined names directly, keeping
-# the linter happy while still falling back cleanly outside a cluster.
 from unittest.mock import MagicMock
 
+# Stubs first so dbutils is defined before any use below
 _g = globals()
 if "spark"       not in _g: spark       = MagicMock()
 if "dbutils"     not in _g: dbutils     = MagicMock()
 if "display"     not in _g: display     = print
 if "displayHTML" not in _g: displayHTML = print
+
+# Resolve repo root from the running notebook's workspace path — works for
+# both DAB deployments (/Users/.../.bundle/.../files/) and Repos.
+try:
+    _nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+    REPO_ROOT = "/Workspace" + "/".join(_nb_path.split("/")[:-2])
+except Exception:
+    REPO_ROOT = "/Workspace/Repos/rfim/multi-tenant-onboarding"
+
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 # Credentials from Databricks Secrets
 try:
@@ -151,7 +155,8 @@ print(f"Metadata    :\n{json.dumps(ctx.metadata, indent=2)}")
 
 # COMMAND ----------
 
-tid = TENANT_PAYLOAD["tenant_id"]
+tid      = TENANT_PAYLOAD["tenant_id"]
+safe_tid = tid.replace("-", "_")   # safe for SQL identifiers
 
 print("=" * 55)
 print("SCHEMAS CREATED")
@@ -159,7 +164,7 @@ print("=" * 55)
 display(spark.sql(f"""
     SELECT schema_name, created
     FROM {CATALOG}.information_schema.schemata
-    WHERE schema_name IN ('bronze','silver','vault','gold_{tid}','monitoring')
+    WHERE schema_name IN ('bronze','silver','vault','gold_{safe_tid}','monitoring')
     ORDER BY schema_name
 """))
 
@@ -171,7 +176,7 @@ print("=" * 55)
 display(spark.sql(f"""
     SELECT table_schema, table_name, table_type, created
     FROM {CATALOG}.information_schema.tables
-    WHERE table_schema IN ('bronze','silver','vault','gold_{tid}','monitoring')
+    WHERE table_schema IN ('bronze','silver','vault','gold_{safe_tid}','monitoring')
     ORDER BY table_schema, table_name
 """))
 
@@ -338,7 +343,7 @@ all_tables = spark.sql(f"""
            COALESCE(table_properties['quality.layer'],   '') AS layer,
            COALESCE(table_properties['quality.dv_type'], '') AS dv_type
     FROM {CATALOG}.information_schema.tables
-    WHERE table_schema IN ('bronze','silver','vault','gold_{tid}','monitoring')
+    WHERE table_schema IN ('bronze','silver','vault','gold_{safe_tid}','monitoring')
     ORDER BY table_schema, table_name
 """)
 

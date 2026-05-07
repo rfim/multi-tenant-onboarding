@@ -139,7 +139,6 @@ def _check_for_deviation(ctx, spark: SparkSession) -> dict:
     """
     catalog   = ctx.catalog
     tenant_id = ctx.tenant_id
-    safe_id   = tenant_id.replace("-", "_")
     standard  = {
         "event_id", "event_type", "event_timestamp",
         "source_system", "status", "reference_id",
@@ -150,7 +149,7 @@ def _check_for_deviation(ctx, spark: SparkSession) -> dict:
             SELECT column_name
             FROM {catalog}.information_schema.columns
             WHERE table_schema = 'bronze'
-              AND table_name   = 'raw_{safe_id}_events'
+              AND table_name   = 'raw_{tenant_id}_events'
               AND column_name NOT IN ('tenant_id','_ingested_at','_source_file','_batch_id')
         """).collect()
 

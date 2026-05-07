@@ -34,15 +34,25 @@ import random
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock
 
-REPO_ROOT = "/Workspace/Repos/rfim/multi-tenant-onboarding"
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
+# Inject stubs first so dbutils is always defined before use
 _g = globals()
 if "spark"       not in _g: spark       = MagicMock()
 if "dbutils"     not in _g: dbutils     = MagicMock()
 if "display"     not in _g: display     = print
 if "displayHTML" not in _g: displayHTML = print
+
+# Resolve the bundle files root from the running notebook's path so this works
+# whether deployed via DAB (/Users/.../.bundle/.../files/) or Repos.
+try:
+    _nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+    # e.g. /Users/x/.bundle/multi-tenant-onboarding/dev/files/notebooks/new_tenant_e2e_test
+    # Go up two segments: /notebooks/<name> -> /files/
+    REPO_ROOT = "/Workspace" + "/".join(_nb_path.split("/")[:-2])
+except Exception:
+    REPO_ROOT = "/Workspace/Repos/rfim/multi-tenant-onboarding"
+
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 # Credentials
 try:
@@ -68,7 +78,10 @@ except Exception:
     CATALOG   = "platform_catalog_dev"
     TENANT_ID = "nova-finance"
 
+SAFE_TENANT_ID = TENANT_ID.replace("-", "_")   # safe for SQL identifiers
+
 print(f"Tenant  : {TENANT_ID}")
+print(f"Safe ID : {SAFE_TENANT_ID}")
 print(f"Catalog : {CATALOG}")
 print(f"Simulate: {os.environ['SIMULATE']}")
 
@@ -140,7 +153,7 @@ display(spark.sql(f"""
              ELSE schema_name
            END AS purpose
     FROM {CATALOG}.information_schema.schemata
-    WHERE schema_name IN ('bronze','silver','vault','monitoring','gold_{TENANT_ID}')
+    WHERE schema_name IN ('bronze','silver','vault','monitoring','gold_{SAFE_TENANT_ID}')
     ORDER BY schema_name
 """))
 
@@ -208,9 +221,9 @@ df_bronze = spark.createDataFrame(rows, schema=columns)
 df_bronze.write \
     .format("delta") \
     .mode("append") \
-    .saveAsTable(f"{CATALOG}.bronze.raw_{TENANT_ID}_events")
+    .saveAsTable(f"{CATALOG}.bronze.raw_{SAFE_TENANT_ID}_events")
 
-print(f"Inserted {df_bronze.count()} rows into bronze.raw_{TENANT_ID}_events")
+print(f"Inserted {df_bronze.count()} rows into bronze.raw_{SAFE_TENANT_ID}_events")
 
 # COMMAND ----------
 # MAGIC %md ### 2b. Acceptance criterion 2 — Bronze schema + content
@@ -222,7 +235,7 @@ display(spark.sql(f"""
     SELECT column_name, data_type, is_nullable
     FROM {CATALOG}.information_schema.columns
     WHERE table_schema = 'bronze'
-      AND table_name   = 'raw_{TENANT_ID}_events'
+      AND table_name   = 'raw_{SAFE_TENANT_ID}_events'
     ORDER BY ordinal_position
 """))
 
@@ -237,7 +250,7 @@ display(spark.sql(f"""
         event_timestamp,
         source_system,
         payload
-    FROM {CATALOG}.bronze.raw_{TENANT_ID}_events
+    FROM {CATALOG}.bronze.raw_{SAFE_TENANT_ID}_events
     WHERE tenant_id = '{TENANT_ID}'
     ORDER BY event_timestamp DESC
     LIMIT 20
@@ -259,7 +272,7 @@ display(spark.sql(f"""
         GET_JSON_OBJECT(payload, '$.vendor_code')   AS vendor_code,
         CAST(GET_JSON_OBJECT(payload, '$.amount_usd') AS DOUBLE) AS amount_usd,
         GET_JSON_OBJECT(payload, '$.status')        AS status
-    FROM {CATALOG}.bronze.raw_{TENANT_ID}_events
+    FROM {CATALOG}.bronze.raw_{SAFE_TENANT_ID}_events
     WHERE tenant_id = '{TENANT_ID}'
     ORDER BY event_timestamp DESC
     LIMIT 25
@@ -274,7 +287,7 @@ display(spark.sql(f"""
         COUNT(*) AS event_count,
         MIN(event_timestamp) AS earliest,
         MAX(event_timestamp) AS latest
-    FROM {CATALOG}.bronze.raw_{TENANT_ID}_events
+    FROM {CATALOG}.bronze.raw_{SAFE_TENANT_ID}_events
     WHERE tenant_id = '{TENANT_ID}'
     GROUP BY event_type
     ORDER BY event_count DESC
@@ -305,7 +318,7 @@ spark.sql(f"""
             GET_JSON_OBJECT(payload, '$.vendor_code')       AS vendor_code,
             CAST(GET_JSON_OBJECT(payload,'$.amount_usd') AS DOUBLE) AS amount_usd,
             _batch_id
-        FROM {CATALOG}.bronze.raw_{TENANT_ID}_events
+        FROM {CATALOG}.bronze.raw_{SAFE_TENANT_ID}_events
         WHERE tenant_id = '{TENANT_ID}'
     ) AS source
     ON  target.tenant_id = source.tenant_id
@@ -378,7 +391,7 @@ display(spark.sql(f"""
         'bronze (raw)'  AS layer,
         COUNT(*)        AS row_count,
         COUNT(DISTINCT event_id) AS unique_events
-    FROM {CATALOG}.bronze.raw_{TENANT_ID}_events
+    FROM {CATALOG}.bronze.raw_{SAFE_TENANT_ID}_events
     WHERE tenant_id = '{TENANT_ID}'
     UNION ALL
     SELECT
@@ -419,10 +432,10 @@ display(spark.sql(f"""
 # COMMAND ----------
 
 # ── kpi_summary ───────────────────────────────────────────────────────────────
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.gold_{TENANT_ID}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.gold_{SAFE_TENANT_ID}")
 
 spark.sql(f"""
-    CREATE OR REPLACE TABLE {CATALOG}.gold_{TENANT_ID}.kpi_summary
+    CREATE OR REPLACE TABLE {CATALOG}.gold_{SAFE_TENANT_ID}.kpi_summary
     USING DELTA
     PARTITIONED BY (event_date)
     TBLPROPERTIES ('quality.layer' = 'gold', 'quality.refresh' = 'daily')
@@ -452,7 +465,7 @@ print("kpi_summary created.")
 
 # ── cycle_time ────────────────────────────────────────────────────────────────
 spark.sql(f"""
-    CREATE OR REPLACE TABLE {CATALOG}.gold_{TENANT_ID}.cycle_time
+    CREATE OR REPLACE TABLE {CATALOG}.gold_{SAFE_TENANT_ID}.cycle_time
     USING DELTA
     TBLPROPERTIES ('quality.layer' = 'gold', 'quality.refresh' = 'daily')
     AS
@@ -498,7 +511,7 @@ print("cycle_time created.")
 
 # ── approval_funnel ───────────────────────────────────────────────────────────
 spark.sql(f"""
-    CREATE OR REPLACE TABLE {CATALOG}.gold_{TENANT_ID}.approval_funnel
+    CREATE OR REPLACE TABLE {CATALOG}.gold_{SAFE_TENANT_ID}.approval_funnel
     USING DELTA
     TBLPROPERTIES ('quality.layer' = 'gold', 'quality.refresh' = 'daily')
     AS
@@ -543,7 +556,7 @@ display(spark.sql(f"""
            table_properties['quality.layer']   AS layer,
            table_properties['quality.refresh'] AS refresh_cadence
     FROM {CATALOG}.information_schema.tables
-    WHERE table_schema = 'gold_{TENANT_ID}'
+    WHERE table_schema = 'gold_{SAFE_TENANT_ID}'
     ORDER BY table_name
 """))
 
@@ -558,7 +571,7 @@ display(spark.sql(f"""
         event_count,
         unique_references,
         pct_of_day
-    FROM {CATALOG}.gold_{TENANT_ID}.kpi_summary
+    FROM {CATALOG}.gold_{SAFE_TENANT_ID}.kpi_summary
     ORDER BY event_date DESC, event_count DESC
     LIMIT 30
 """))
@@ -575,7 +588,7 @@ display(spark.sql(f"""
         ROUND(PERCENTILE(cycle_days, 0.95), 1) AS p95_days,
         MIN(cycle_days)                  AS min_days,
         MAX(cycle_days)                  AS max_days
-    FROM {CATALOG}.gold_{TENANT_ID}.cycle_time
+    FROM {CATALOG}.gold_{SAFE_TENANT_ID}.cycle_time
     GROUP BY final_status
     ORDER BY references DESC
 """))
@@ -594,7 +607,7 @@ display(spark.sql(f"""
         rejected,
         total,
         approval_rate_pct
-    FROM {CATALOG}.gold_{TENANT_ID}.approval_funnel
+    FROM {CATALOG}.gold_{SAFE_TENANT_ID}.approval_funnel
     ORDER BY week_start DESC
     LIMIT 8
 """))
@@ -664,7 +677,7 @@ display(spark.sql(f"""
         SUM(unique_references)         AS total_unique_references,
         ROUND(SUM(CASE WHEN status='approved' THEN event_count ELSE 0 END)
               * 100.0 / NULLIF(SUM(event_count),0), 1) AS approval_rate_pct
-    FROM {CATALOG}.gold_{TENANT_ID}.kpi_summary
+    FROM {CATALOG}.gold_{SAFE_TENANT_ID}.kpi_summary
 """))
 
 # COMMAND ----------
@@ -682,7 +695,7 @@ display(spark.sql(f"""
         escalated,
         total,
         approval_rate_pct AS `approval rate %`
-    FROM {CATALOG}.gold_{TENANT_ID}.approval_funnel
+    FROM {CATALOG}.gold_{SAFE_TENANT_ID}.approval_funnel
     ORDER BY week_start
 """))
 
@@ -701,7 +714,7 @@ display(spark.sql(f"""
         ROUND(PERCENTILE(cycle_days, 0.50), 1)   AS p50_days,
         ROUND(PERCENTILE(cycle_days, 0.75), 1)   AS p75_days,
         ROUND(PERCENTILE(cycle_days, 0.95), 1)   AS p95_days
-    FROM {CATALOG}.gold_{TENANT_ID}.cycle_time
+    FROM {CATALOG}.gold_{SAFE_TENANT_ID}.cycle_time
     GROUP BY final_status
     ORDER BY avg_days
 """))
@@ -720,7 +733,7 @@ display(spark.sql(f"""
         COUNT(DISTINCT GET_JSON_OBJECT(b.payload,'$.workflow_id')) AS workflows,
         ROUND(AVG(CAST(GET_JSON_OBJECT(b.payload,'$.amount_usd') AS DOUBLE)), 2) AS avg_amount_usd,
         SUM(CAST(GET_JSON_OBJECT(b.payload,'$.amount_usd') AS DOUBLE))           AS total_amount_usd
-    FROM {CATALOG}.bronze.raw_{TENANT_ID}_events AS b
+    FROM {CATALOG}.bronze.raw_{SAFE_TENANT_ID}_events AS b
     WHERE b.tenant_id = '{TENANT_ID}'
     GROUP BY vendor_code, approval_tier
     ORDER BY total_amount_usd DESC
@@ -744,10 +757,10 @@ display(spark.sql(f"""
         COALESCE(t.table_properties['quality.dv_type'], '') AS dv_type,
         t.created
     FROM {CATALOG}.information_schema.tables AS t
-    WHERE t.table_schema IN ('bronze','silver','vault','gold_{TENANT_ID}','monitoring')
+    WHERE t.table_schema IN ('bronze','silver','vault','gold_{SAFE_TENANT_ID}','monitoring')
       AND (
             t.table_name LIKE '%{TENANT_ID}%'
-         OR t.table_schema IN ('monitoring','gold_{TENANT_ID}')
+         OR t.table_schema IN ('monitoring','gold_{SAFE_TENANT_ID}')
          OR t.table_schema IN ('silver')
       )
     ORDER BY t.table_schema, t.table_name

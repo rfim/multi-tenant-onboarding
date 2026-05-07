@@ -27,23 +27,20 @@ logger = logging.getLogger(__name__)
 def run(ctx, spark: SparkSession):
     catalog   = ctx.catalog
     tenant_id = ctx.tenant_id
-    # SQL identifiers cannot contain hyphens; replace with underscores.
-    # The original tenant_id (with hyphens) is still used in data column values.
-    safe_id   = tenant_id.replace("-", "_")
 
-    logger.info("Registering tenant %s (safe_id=%s) in catalog %s", tenant_id, safe_id, catalog)
+    logger.info("Registering tenant %s in catalog %s", tenant_id, catalog)
 
     _ensure_catalog(catalog, spark)
     _ensure_monitoring_schema(catalog, spark)
     _ensure_monitoring_tables(catalog, spark)
-    _create_gold_schema(catalog, safe_id, spark)
-    _create_bronze_table(catalog, safe_id, tenant_id, spark)
-    _create_silver_table(catalog, spark)
-    _create_vault_tables(catalog, safe_id, tenant_id, spark)
+    _create_gold_schema(catalog, tenant_id, spark)
+    _create_bronze_table(catalog, tenant_id, spark)
+    _create_silver_table(catalog, tenant_id, spark)
+    _create_vault_tables(catalog, tenant_id, spark)
     _register_tenant(catalog, tenant_id, spark)
 
     logger.info("Tenant %s registered.", tenant_id)
-    return replace(ctx, metadata={**ctx.metadata, "gold_schema": f"gold_{safe_id}"})
+    return replace(ctx, metadata={**ctx.metadata, "gold_schema": f"gold_{tenant_id}"})
 
 
 # ── Catalog bootstrap ─────────────────────────────────────────────────────────
@@ -158,10 +155,10 @@ def _create_gold_schema(catalog: str, tenant_id: str, spark: SparkSession) -> No
     logger.info("Gold schema created: %s.gold_%s", catalog, tenant_id)
 
 
-def _create_bronze_table(catalog: str, safe_id: str, tenant_id: str, spark: SparkSession) -> None:
+def _create_bronze_table(catalog: str, tenant_id: str, spark: SparkSession) -> None:
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.bronze")
     spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {catalog}.bronze.raw_{safe_id}_events (
+        CREATE TABLE IF NOT EXISTS {catalog}.bronze.raw_{tenant_id}_events (
             tenant_id       STRING    NOT NULL,
             event_id        STRING    NOT NULL,
             event_type      STRING    NOT NULL,
@@ -176,14 +173,14 @@ def _create_bronze_table(catalog: str, safe_id: str, tenant_id: str, spark: Spar
         PARTITIONED BY (tenant_id)
         TBLPROPERTIES (
             'delta.enableChangeDataFeed' = 'true',
-            'quality.layer'     = 'bronze',
+            'quality.layer'    = 'bronze',
             'quality.tenant_id' = '{tenant_id}'
         )
     """)
-    logger.info("Bronze table created: %s.bronze.raw_%s_events", catalog, safe_id)
+    logger.info("Bronze table created: %s.bronze.raw_%s_events", catalog, tenant_id)
 
 
-def _create_silver_table(catalog: str, spark: SparkSession) -> None:
+def _create_silver_table(catalog: str, tenant_id: str, spark: SparkSession) -> None:
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.silver")
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {catalog}.silver.events (
@@ -208,11 +205,11 @@ def _create_silver_table(catalog: str, spark: SparkSession) -> None:
     logger.info("Silver table ready: %s.silver.events", catalog)
 
 
-def _create_vault_tables(catalog: str, safe_id: str, tenant_id: str, spark: SparkSession) -> None:
+def _create_vault_tables(catalog: str, tenant_id: str, spark: SparkSession) -> None:
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.vault")
 
     spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {catalog}.vault.hub_{safe_id}_event (
+        CREATE TABLE IF NOT EXISTS {catalog}.vault.hub_{tenant_id}_event (
             h_event_hk    STRING    NOT NULL,
             tenant_id     STRING    NOT NULL,
             event_id      STRING    NOT NULL,
@@ -223,13 +220,12 @@ def _create_vault_tables(catalog: str, safe_id: str, tenant_id: str, spark: Spar
         PARTITIONED BY (tenant_id)
         TBLPROPERTIES (
             'quality.layer'   = 'vault',
-            'quality.dv_type' = 'hub',
-            'quality.tenant_id' = '{tenant_id}'
+            'quality.dv_type' = 'hub'
         )
     """)
 
     spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {catalog}.vault.sat_{safe_id}_event_detail (
+        CREATE TABLE IF NOT EXISTS {catalog}.vault.sat_{tenant_id}_event_detail (
             h_event_hk    STRING    NOT NULL,
             load_dts      TIMESTAMP NOT NULL,
             load_end_dts  TIMESTAMP,
@@ -244,14 +240,13 @@ def _create_vault_tables(catalog: str, safe_id: str, tenant_id: str, spark: Spar
         PARTITIONED BY (tenant_id)
         TBLPROPERTIES (
             'quality.layer'   = 'vault',
-            'quality.dv_type' = 'satellite',
-            'quality.tenant_id' = '{tenant_id}'
+            'quality.dv_type' = 'satellite'
         )
     """)
 
     logger.info(
         "Vault tables created: hub_%s_event, sat_%s_event_detail",
-        safe_id, safe_id,
+        tenant_id, tenant_id,
     )
 
 

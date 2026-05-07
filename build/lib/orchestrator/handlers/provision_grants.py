@@ -37,7 +37,6 @@ GRANT_MATRIX = [
 def run(ctx, spark: SparkSession):
     catalog   = ctx.catalog
     tenant_id = ctx.tenant_id
-    safe_id   = tenant_id.replace("-", "_")
 
     logger.info("Provisioning grants for tenant %s", tenant_id)
 
@@ -45,8 +44,8 @@ def run(ctx, spark: SparkSession):
     skipped: list[str] = []
 
     for privilege, obj_type, obj_tpl, principal_tpl in GRANT_MATRIX:
-        obj_name  = obj_tpl.format(t=safe_id)
-        principal = principal_tpl.format(t=safe_id)
+        obj_name  = obj_tpl.format(t=tenant_id)
+        principal = principal_tpl.format(t=tenant_id)
 
         try:
             spark.sql(
