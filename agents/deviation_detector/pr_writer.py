@@ -11,22 +11,32 @@ Prohibited: merge PR, push to staging or main, execute SQL.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+REPO = os.environ.get("GITHUB_REPO", "rfim/multi-tenant-onboarding")
+SIMULATE = os.environ.get("SIMULATE", "0") == "1"
 
 
 def open_pr(tenant_id: str, models: dict[str, str], deviation_summary: str) -> str:
     """
-    Creates a branch and opens a PR with the adapted Silver models.
+    Creates a branch, writes adapted SQL files, and opens a GitHub PR.
+
+    When SIMULATE=1 (or no GITHUB_TOKEN), writes files locally and returns
+    a placeholder URL so the test can proceed without a live GitHub token.
 
     Args:
         tenant_id: the tenant being onboarded
-        models: dict mapping filename -> sql_content from detector.generate_adapted_models()
-        deviation_summary: plain-language description of the deviations found
+        models: dict mapping filename -> sql_content
+        deviation_summary: plain-language description of deviations
 
     Returns:
-        The URL of the opened PR.
+        The URL of the opened PR (or a local path in simulate mode).
     """
     branch_name = f"onboard/{tenant_id}/adapted-silver-{_timestamp()}"
 
@@ -35,18 +45,88 @@ def open_pr(tenant_id: str, models: dict[str, str], deviation_summary: str) -> s
         tenant_id, branch_name, len(models),
     )
 
-    # TODO: implement via PyGithub or GitHub REST API
-    # 1. Create branch from dev HEAD
-    # 2. For each model in models: write to dbt/models/silver/<tenant_id>/<filename>
-    # 3. Open PR with:
-    #    title: "[deviation] <tenant_id> adapted Silver models"
-    #    body: _build_pr_body(tenant_id, models, deviation_summary)
-    #    base: dev
-    #    labels: ["tenant_model", "deviation-detected", "needs-review"]
-    #    assignees: [] (promotion_classifier will suggest reviewers)
-    # 4. Return PR URL
+    if SIMULATE or not os.environ.get("GITHUB_TOKEN"):
+        return _open_pr_simulated(tenant_id, branch_name, models, deviation_summary)
 
-    raise NotImplementedError("open_pr not yet implemented")
+    return _open_pr_real(tenant_id, branch_name, models, deviation_summary)
+
+
+def _open_pr_simulated(
+    tenant_id: str,
+    branch_name: str,
+    models: dict[str, str],
+    deviation_summary: str,
+) -> str:
+    """
+    Writes adapted SQL files to a temp directory and returns a local path.
+    Used when SIMULATE=1 or GITHUB_TOKEN is absent (test environments).
+    """
+    out_dir = Path(tempfile.mkdtemp(prefix=f"deviation_pr_{tenant_id}_"))
+    for filename, sql in models.items():
+        dest = out_dir / Path(filename).name
+        dest.write_text(sql)
+        logger.info("[simulate] Wrote %s (%d bytes)", dest, len(sql))
+
+    pr_body_path = out_dir / "PR_BODY.md"
+    pr_body_path.write_text(_build_pr_body(tenant_id, models, deviation_summary))
+
+    logger.info("[simulate] PR body written to %s", pr_body_path)
+    logger.info("[simulate] Branch would be: %s", branch_name)
+    return f"file://{out_dir}  (simulated — set GITHUB_TOKEN for a real PR)"
+
+
+def _open_pr_real(
+    tenant_id: str,
+    branch_name: str,
+    models: dict[str, str],
+    deviation_summary: str,
+) -> str:
+    """
+    Creates a git branch, commits adapted SQL files, and opens a GitHub PR
+    via the gh CLI. Requires GITHUB_TOKEN in the environment.
+    """
+    repo_root = Path(__file__).parents[2]
+
+    # Write model files into the working tree
+    for filename, sql in models.items():
+        dest = repo_root / "dbt" / "models" / "silver" / tenant_id / Path(filename).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(sql)
+        logger.info("Wrote %s", dest.relative_to(repo_root))
+
+    # Create branch, stage, and commit
+    _git(repo_root, "checkout", "-b", branch_name)
+    _git(repo_root, "add", f"dbt/models/silver/{tenant_id}/")
+    _git(repo_root, "commit", "-m", f"[deviation] {tenant_id}: adapted Silver models")
+    _git(repo_root, "push", "-u", "origin", branch_name)
+
+    # Open PR via gh CLI
+    body = _build_pr_body(tenant_id, models, deviation_summary)
+    result = subprocess.run(
+        [
+            "gh", "pr", "create",
+            "--repo", REPO,
+            "--base", "dev",
+            "--head", branch_name,
+            "--title", f"[deviation] {tenant_id} adapted Silver models",
+            "--body", body,
+            "--label", "tenant_model",
+            "--label", "deviation-detected",
+            "--label", "needs-review",
+            "--draft",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=str(repo_root),
+    )
+    pr_url = result.stdout.strip()
+    logger.info("PR opened: %s", pr_url)
+    return pr_url
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git"] + list(args), cwd=str(cwd), check=True)
 
 
 def _build_pr_body(tenant_id: str, models: dict[str, str], deviation_summary: str) -> str:

@@ -16,14 +16,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import anthropic
 import yaml
+
+from llm.client import chat, CODEX_MEDIUM
 
 logger = logging.getLogger(__name__)
 
 CATEGORIES_FILE = Path(__file__).parents[2] / "promotion" / "categories.yml"
 SKILL_FILE = Path(__file__).parents[2] / "skills" / "promotion_classifier.md"
-MODEL = "claude-sonnet-4-6"
+MODEL = CODEX_MEDIUM
 MAX_TOKENS = 2048
 
 
@@ -108,8 +109,6 @@ def _llm_classify(
     rule_based: dict,
 ) -> dict:
     """Falls back to LLM classification when file globs are ambiguous."""
-    client = anthropic.Anthropic()
-
     categories_yaml = yaml.dump(
         {k: {
             "id": v["id"],
@@ -119,7 +118,7 @@ def _llm_classify(
         default_flow_style=False,
     )
 
-    message = client.messages.create(
+    response = chat(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=(
@@ -144,7 +143,7 @@ def _llm_classify(
     )
 
     import json
-    parsed = json.loads(message.content[0].text)
+    parsed = json.loads(response.content)
     cat = _find_category_by_id(categories, parsed["category_id"])
 
     return {

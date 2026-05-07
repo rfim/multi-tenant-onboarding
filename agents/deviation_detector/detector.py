@@ -6,7 +6,7 @@ not match the standard template field list. This agent:
 
   1. Reads the actual schema from the source system or metadata API.
   2. Computes the diff against the standard Silver model field list.
-  3. Calls the LLM (via the Anthropic SDK) with the diff and the platform
+  3. Calls the LLM (via the Codex client) with the diff and the platform
      modelling skill file to produce adapted Silver model SQL.
   4. Passes the adapted SQL to pr_writer.py to open a draft PR.
 
@@ -14,6 +14,7 @@ This agent never writes SQL to staging or main, never executes DDL, and never
 merges PRs. It only produces a draft PR on the dev branch.
 
 LLM guidance is loaded from skills/deviation_detector.md at runtime.
+Auth: CODEX_AUTH_JSON environment variable (see llm/client.py).
 """
 
 from __future__ import annotations
@@ -23,12 +24,12 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import anthropic
+from llm.client import chat, CODEX_LARGE
 
 logger = logging.getLogger(__name__)
 
 SKILL_FILE = Path(__file__).parents[2] / "skills" / "deviation_detector.md"
-MODEL = "claude-opus-4-7"
+MODEL = CODEX_LARGE
 MAX_TOKENS = 8192
 
 
@@ -84,14 +85,12 @@ def generate_adapted_models(report: DeviationReport, catalog: str) -> dict[str, 
     skill = SKILL_FILE.read_text()
     prompt = _build_prompt(report, catalog, skill)
 
-    client = anthropic.Anthropic()
-
     logger.info(
         "Calling LLM to generate adapted models for tenant %s (%d extra, %d missing fields)",
         report.tenant_id, len(report.extra_fields), len(report.missing_fields),
     )
 
-    message = client.messages.create(
+    response = chat(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=(
@@ -103,8 +102,7 @@ def generate_adapted_models(report: DeviationReport, catalog: str) -> dict[str, 
         messages=[{"role": "user", "content": prompt}],
     )
 
-    raw_output = message.content[0].text
-    return _parse_model_output(raw_output)
+    return _parse_model_output(response.content)
 
 
 def _load_standard_fields() -> list[str]:

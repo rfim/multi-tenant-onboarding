@@ -19,13 +19,14 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
 from pyspark.sql import SparkSession
+
+from llm.client import chat, CODEX_MEDIUM
 
 logger = logging.getLogger(__name__)
 
 SKILL_FILE = Path(__file__).parents[2] / "skills" / "changelog_summariser.md"
-MODEL = "claude-sonnet-4-6"
+MODEL = CODEX_MEDIUM
 MAX_TOKENS = 2048
 
 
@@ -70,11 +71,9 @@ def _load_changes(catalog: str, tenant_id: str, lookback_days: int, spark: Spark
 def _generate_summary(tenant_id: str, changes: list[dict], lookback_days: int) -> str:
     """Calls the LLM to produce a plain-language summary."""
     skill = SKILL_FILE.read_text()
-    client = anthropic.Anthropic()
-
     changes_text = _format_changes_for_prompt(changes)
 
-    message = client.messages.create(
+    response = chat(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=(
@@ -95,7 +94,7 @@ def _generate_summary(tenant_id: str, changes: list[dict], lookback_days: int) -
         }],
     )
 
-    return message.content[0].text
+    return response.content
 
 
 def _format_changes_for_prompt(changes: list[dict]) -> str:

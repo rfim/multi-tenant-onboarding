@@ -1,0 +1,23 @@
+{
+  "tenant_id": "acme-corp",
+  "display_name": "Acme Corporation",
+  "env": "dev",
+  "catalog": "platform_catalog_dev",
+  "source_schema": {
+    "event_id":        { "type": "STRING",    "nullable": false },
+    "event_type":      { "type": "STRING",    "nullable": false },
+    "event_timestamp": { "type": "TIMESTAMP", "nullable": false },
+    "source_system":   { "type": "STRING",    "nullable": true  },
+    "status":          { "type": "STRING",    "nullable": true  },
+    "reference_id":    { "type": "STRING",    "nullable": true  },
+    "approval_tier":   { "type": "STRING",    "nullable": true  },
+    "vendor_code":     { "type": "STRING",    "nullable": true  },
+    "amount_usd":      { "type": "DOUBLE",    "nullable": true  }
+  },
+  "dashboard_templates": ["kpi_overview", "approval_volume", "cycle_time", "vendor_analytics"],
+  "customer_profile": {
+    "industry": "financial_services",
+    "monthly_event_volume": 250000,
+    "custom_workflow_states": ["pending_audit", "escalated"]
+  }
+}

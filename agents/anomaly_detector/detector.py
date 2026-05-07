@@ -26,13 +26,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-import anthropic
 from pyspark.sql import SparkSession
+
+from llm.client import chat, CODEX_LARGE
 
 logger = logging.getLogger(__name__)
 
 SKILL_FILE = Path(__file__).parents[2] / "skills" / "anomaly_detector.md"
-MODEL = "claude-opus-4-7"
+MODEL = CODEX_LARGE
 MAX_TOKENS = 4096
 
 Severity = Literal["sev1", "sev2", "sev3"]
@@ -76,9 +77,8 @@ def generate_remediation(anomaly: Anomaly) -> str:
     GE expectation that would catch this anomaly in future runs.
     """
     skill = SKILL_FILE.read_text()
-    client = anthropic.Anthropic()
 
-    message = client.messages.create(
+    response = chat(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=(
@@ -93,7 +93,7 @@ def generate_remediation(anomaly: Anomaly) -> str:
         }],
     )
 
-    return message.content[0].text
+    return response.content
 
 
 def _load_active_tenants(catalog: str, spark: SparkSession) -> list[str]:
