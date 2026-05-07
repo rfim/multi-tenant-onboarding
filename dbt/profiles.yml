@@ -1,0 +1,20 @@
+databricks_unity_catalog:
+  target: dev
+  outputs:
+    dev:
+      type: databricks
+      catalog: platform_catalog_dev
+      schema: gold_nova_finance
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      threads: 4
+
+    prod:
+      type: databricks
+      catalog: platform_catalog
+      schema: gold_nova_finance
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      threads: 8

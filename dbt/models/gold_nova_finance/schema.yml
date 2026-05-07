@@ -1,0 +1,71 @@
+version: 2
+
+sources:
+  - name: silver
+    database: "{{ env_var('DBT_CATALOG', 'platform_catalog_dev') }}"
+    schema: silver
+    tables:
+      - name: events
+        description: "Deduplicated Silver events table (all tenants, RLS filtered)"
+        columns:
+          - name: tenant_id
+            description: "Tenant identifier"
+            tests: [not_null]
+          - name: event_id
+            description: "Unique event identifier"
+            tests: [not_null, unique]
+          - name: event_timestamp
+            tests: [not_null]
+          - name: status
+            tests:
+              - accepted_values:
+                  values: [pending, in_progress, completed, approved, rejected,
+                           cancelled, pending_audit, escalated]
+
+models:
+  - name: kpi_summary
+    description: >
+      Daily KPI rollup for nova-finance. Partitioned by event_date.
+      Covers the last 90 days. Refreshed once per day.
+    columns:
+      - name: event_date
+        tests: [not_null]
+      - name: event_count
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: pct_of_day
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "BETWEEN 0 AND 100"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [event_date, event_type, status]
+
+  - name: cycle_time
+    description: >
+      End-to-end cycle time per reference_id for nova-finance.
+      Only includes completed/approved/rejected items (no in-progress).
+    columns:
+      - name: reference_id
+        tests: [not_null, unique]
+      - name: cycle_days
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: final_status
+        tests:
+          - accepted_values:
+              values: [approved, rejected, escalated, in_progress]
+
+  - name: approval_funnel
+    description: >
+      Weekly approval funnel with conversion rates for nova-finance.
+    columns:
+      - name: week_start
+        tests: [not_null, unique]
+      - name: approval_rate_pct
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "BETWEEN 0 AND 100"

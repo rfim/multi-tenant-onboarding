@@ -1,0 +1,20 @@
+name: multi_tenant_platform
+version: "1.0.0"
+config-version: 2
+
+profile: databricks_unity_catalog
+
+model-paths: ["models"]
+test-paths:  ["tests"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  multi_tenant_platform:
+    +materialized: table
+
+    gold_nova_finance:
+      +schema: gold_nova_finance
+      +tags: ["gold", "tenant_nova_finance"]
